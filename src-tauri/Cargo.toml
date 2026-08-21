@@ -1,0 +1,46 @@
+[package]
+name = "token-proxy"
+version = "0.1.0"
+description = "Local OpenAI-compatible LLM proxy with retry, routing and a Tauri desktop shell"
+authors = ["token-proxy"]
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "token_proxy_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+futures-util = "0.3"
+backon = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+directories = "6"
+notify = "7"
+uuid = { version = "1", features = ["v4"] }
+parking_lot = "0.12"
+chrono = { version = "0.4", features = ["serde"] }
+dashmap = "6"
+async-stream = "0.3"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

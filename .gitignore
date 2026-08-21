@@ -1,0 +1,20 @@
+# Node
+node_modules/
+dist/
+.npm-cache/
+*.local
+
+# Rust
+src-tauri/target/
+.cargo-home/
+.cargo/
+
+# 运行时产物
+src-tauri/gen/
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 日志
+*.log

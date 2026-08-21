@@ -1,0 +1,175 @@
+pub mod proxy;
+
+use proxy::config::AppConfig;
+use proxy::state::AppState;
+use proxy::store::{StatusDto, config_path, load_config, validate};
+use proxy::store::save_config as persist_config;
+use std::sync::Arc;
+use tauri::Manager;
+
+/// 从磁盘重新加载配置（热重载/手动刷新）
+fn reload(state: &Arc<AppState>) -> Result<(), String> {
+    let path = state.config_path.clone();
+    let cfg = load_config(&path)?;
+    *state.config.write() = cfg;
+    Ok(())
+}
+
+#[tauri::command]
+fn get_config(state: tauri::State<Arc<AppState>>) -> Result<AppConfig, String> {
+    Ok(state.config.read().clone())
+}
+
+#[tauri::command]
+fn save_config(
+    state: tauri::State<Arc<AppState>>,
+    cfg: AppConfig,
+) -> Result<(), String> {
+    validate(&cfg)?;
+    let path = state.config_path.clone();
+    persist_config(&path, &cfg)?;
+    *state.config.write() = cfg;
+    Ok(())
+}
+
+#[tauri::command]
+fn reload_config(state: tauri::State<Arc<AppState>>) -> Result<AppConfig, String> {
+    reload(&state)?;
+    Ok(state.config.read().clone())
+}
+
+#[tauri::command]
+fn get_status(state: tauri::State<Arc<AppState>>) -> Result<StatusDto, String> {
+    let cfg = state.config.read();
+    Ok(StatusDto {
+        running: true,
+        host: cfg.server.host.clone(),
+        port: cfg.server.port,
+        config_path: state.config_path.display().to_string(),
+        uptime_secs: state.started_at.elapsed().as_secs(),
+        providers: cfg.providers.len(),
+        routes: cfg.routes.len(),
+        total_requests: state.metrics.snapshot().total,
+    })
+}
+
+#[tauri::command]
+fn get_metrics(state: tauri::State<Arc<AppState>>) -> Result<proxy::state::MetricsSnapshot, String> {
+    Ok(state.metrics.snapshot())
+}
+
+#[tauri::command]
+fn reset_breaker(
+    state: tauri::State<Arc<AppState>>,
+    provider_id: String,
+) -> Result<(), String> {
+    if let Some(b) = state.breakers.get(&provider_id) {
+        b.reset();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn get_breaker_status(
+    state: tauri::State<Arc<AppState>>,
+) -> Result<serde_json::Value, String> {
+    let mut map = serde_json::Map::new();
+    for entry in state.breakers.iter() {
+        let s = entry.value().status();
+        map.insert(
+            entry.key().clone(),
+            serde_json::json!({
+                "state": match s.state {
+                    proxy::circuit::BreakerState::Closed => "closed",
+                    proxy::circuit::BreakerState::Open => "open",
+                    proxy::circuit::BreakerState::HalfOpen => "half_open",
+                },
+                "consecutive_failures": s.consecutive_failures,
+            }),
+        );
+    }
+    Ok(serde_json::Value::Object(map))
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .setup(|app| {
+            let _ = tracing_subscriber::fmt()
+                .with_env_filter(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| "info,token_proxy=debug".into()),
+                )
+                .try_init();
+
+            // 加载配置
+            let path = config_path();
+            let cfg = load_config(&path).unwrap_or_else(|e| {
+                tracing::error!("failed to load config at {}: {e}", path.display());
+                AppConfig::default()
+            });
+            tracing::info!("config at {}", path.display());
+
+            let state = Arc::new(AppState::new(cfg, path));
+            // 注入 AppHandle 用于事件推送
+            *state.app.lock() = Some(app.handle().clone());
+            app.manage(state.clone());
+
+            // 启动代理服务器（后台任务）
+            let server_state = state.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = proxy::serve(server_state).await {
+                    tracing::error!("proxy server exited: {e}");
+                }
+            });
+
+            // 配置文件热重载监听
+            let watch_state = state.clone();
+            tauri::async_runtime::spawn(async move {
+                use notify::{Watcher, RecursiveMode, recommended_watcher};
+                let watch_dir = watch_state
+                    .config_path
+                    .parent()
+                    .map(|p| p.to_path_buf());
+                let mut watcher = match recommended_watcher(move |res: notify::Result<notify::Event>| {
+                    if let Ok(ev) = res {
+                        if ev.kind.is_modify() || ev.kind.is_create() {
+                            if let Err(e) = reload(&watch_state) {
+                                tracing::warn!("config hot-reload failed: {e}");
+                            } else {
+                                tracing::info!("config hot-reloaded");
+                                use tauri::Emitter;
+                                if let Some(app) = watch_state.app.lock().as_ref() {
+                                    let _ = app.emit("config-changed", ());
+                                }
+                            }
+                        }
+                    }
+                }) {
+                    Ok(w) => w,
+                    Err(e) => {
+                        tracing::warn!("watcher setup failed: {e}");
+                        return;
+                    }
+                };
+                if let Some(dir) = watch_dir {
+                    let _ = watcher.watch(&dir, RecursiveMode::NonRecursive);
+                }
+                // 保持任务存活
+                std::future::pending::<()>().await;
+            });
+
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            get_config,
+            save_config,
+            reload_config,
+            get_status,
+            get_metrics,
+            reset_breaker,
+            get_breaker_status,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
