@@ -23,3 +23,7 @@ Thumbs.db
 shots/
 pe-*.txt
 
+
+# 所有 Rust target 目录（含 proxy-core）
+**/target/
+

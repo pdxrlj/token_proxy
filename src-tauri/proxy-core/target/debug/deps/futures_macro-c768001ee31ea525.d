@@ -1,9 +1,0 @@
-F:\code\token_proxy\src-tauri\proxy-core\target\debug\deps\futures_macro-c768001ee31ea525.d: F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\futures-macro-0.3.34\src\lib.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\futures-macro-0.3.34\src\executor.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\futures-macro-0.3.34\src\join.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\futures-macro-0.3.34\src\select.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\futures-macro-0.3.34\src\stream_select.rs
-
-F:\code\token_proxy\src-tauri\proxy-core\target\debug\deps\futures_macro-c768001ee31ea525.dll: F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\futures-macro-0.3.34\src\lib.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\futures-macro-0.3.34\src\executor.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\futures-macro-0.3.34\src\join.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\futures-macro-0.3.34\src\select.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\futures-macro-0.3.34\src\stream_select.rs
-
-F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\futures-macro-0.3.34\src\lib.rs:
-F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\futures-macro-0.3.34\src\executor.rs:
-F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\futures-macro-0.3.34\src\join.rs:
-F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\futures-macro-0.3.34\src\select.rs:
-F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\futures-macro-0.3.34\src\stream_select.rs:
