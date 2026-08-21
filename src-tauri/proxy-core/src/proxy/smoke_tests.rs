@@ -22,7 +22,11 @@ use tokio::net::TcpListener;
 /// mock 记录每次收到的请求体（用于断言重试时参数不丢失）
 type BodyRecorder = Arc<Mutex<Vec<Value>>>;
 
-fn mock_router(counter: Arc<AtomicU32>, recorder: Option<BodyRecorder>) -> Router {
+fn mock_router(
+    counter: Arc<AtomicU32>,
+    recorder: Option<BodyRecorder>,
+    auth_seen: Option<Arc<std::sync::atomic::AtomicBool>>,
+) -> Router {
     Router::new()
         .route(
             "/v1/models",
@@ -35,7 +39,12 @@ fn mock_router(counter: Arc<AtomicU32>, recorder: Option<BodyRecorder>) -> Route
         )
         .route(
             "/v1/chat/completions",
-            post(move |Json(body): Json<Value>| async move {
+            post(move |headers: axum::http::HeaderMap, Json(body): Json<Value>| async move {
+                if let Some(f) = &auth_seen {
+                    if headers.contains_key(axum::http::header::AUTHORIZATION) {
+                        f.store(true, Ordering::SeqCst);
+                    }
+                }
                 if let Some(r) = &recorder {
                     r.lock().unwrap().push(body.clone());
                 }
@@ -104,22 +113,41 @@ fn mock_router(counter: Arc<AtomicU32>, recorder: Option<BodyRecorder>) -> Route
 }
 
 async fn spawn_mock(port: u16, counter: Arc<AtomicU32>) {
-    spawn_mock_with_recorder(port, counter, None).await;
+    spawn_mock_full(port, counter, None, None).await;
 }
 
 async fn spawn_mock_with_recorder(port: u16, counter: Arc<AtomicU32>, recorder: Option<BodyRecorder>) {
+    spawn_mock_full(port, counter, recorder, None).await;
+}
+
+async fn spawn_mock_full(
+    port: u16,
+    counter: Arc<AtomicU32>,
+    recorder: Option<BodyRecorder>,
+    auth_seen: Option<Arc<std::sync::atomic::AtomicBool>>,
+) {
     let listener = TcpListener::bind(("127.0.0.1", port))
         .await
         .expect("bind mock port");
-    let app = mock_router(counter, recorder);
+    let app = mock_router(counter, recorder, auth_seen);
     tokio::spawn(async move {
         axum::serve(listener, app).await.expect("mock server");
     });
 }
 
 async fn spawn_proxy(port: u16, mock_port: u16, retry_override: Option<u32>) -> Arc<AppState> {
+    spawn_proxy_with_key(port, mock_port, retry_override, "").await
+}
+
+async fn spawn_proxy_with_key(
+    port: u16,
+    mock_port: u16,
+    retry_override: Option<u32>,
+    local_api_key: &str,
+) -> Arc<AppState> {
     let mut cfg = AppConfig::default();
     cfg.server.port = port;
+    cfg.server.local_api_key = local_api_key.into();
     cfg.providers = vec![ProviderConfig {
         id: "mock".into(),
         name: "Mock".into(),
@@ -306,4 +334,52 @@ async fn smoke_full_chain() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200, "recovered after reset");
+
+    // ---- 场景 F：本地访问令牌语义 ----
+    // F1: 令牌为空 + 客户端传任意 API key → 放行 200，且 key 不透传到上游
+    let mock_counter5 = Arc::new(AtomicU32::new(0));
+    let auth_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    spawn_mock_full(9905, mock_counter5.clone(), None, Some(auth_seen.clone())).await;
+    let _state5 = spawn_proxy_with_key(8795, 9905, None, "").await;
+    let resp = client
+        .post("http://127.0.0.1:8795/v1/chat/completions")
+        .header("Authorization", "Bearer client-provided-key")
+        .json(&chat_body(false))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "empty local token must ignore client Authorization");
+    assert!(
+        !auth_seen.load(Ordering::SeqCst),
+        "client Authorization must NOT be forwarded to upstream"
+    );
+
+    // F2: 令牌非空 → 未带/错误 → 401；正确 → 200
+    let mock_counter6 = Arc::new(AtomicU32::new(0));
+    spawn_mock_full(9906, mock_counter6.clone(), None, None).await;
+    let _state6 = spawn_proxy_with_key(8796, 9906, None, "secret").await;
+    let resp = client
+        .post("http://127.0.0.1:8796/v1/chat/completions")
+        .json(&chat_body(false))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401, "missing token must be rejected");
+    let resp = client
+        .post("http://127.0.0.1:8796/v1/chat/completions")
+        .header("Authorization", "Bearer wrong")
+        .json(&chat_body(false))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401, "wrong token must be rejected");
+    let resp = client
+        .post("http://127.0.0.1:8796/v1/chat/completions")
+        .header("Authorization", "Bearer secret")
+        .json(&chat_body(false))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "correct token must pass");
+    assert_eq!(mock_counter6.load(Ordering::SeqCst), 1, "only the authed request reaches upstream");
 }
