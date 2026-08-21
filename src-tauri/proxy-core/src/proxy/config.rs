@@ -111,10 +111,14 @@ impl ProviderConfig {
         }
     }
 
-    /// 拼接端点：base_url + "/chat/completions"（容忍 path 带/不带前导斜杠）
+    /// 拼接端点：base_url + "/chat/completions"（容忍 path 带/不带前导斜杠；
+    /// 若 base_url 已含完整端点路径，直接使用，兼容误填场景）
     pub fn endpoint(&self, path: &str) -> String {
         let base = self.base_url.trim_end_matches('/');
         let p = path.trim_start_matches('/');
+        if base.ends_with(&format!("/{p}")) {
+            return base.to_string();
+        }
         format!("{base}/{p}")
     }
 }
@@ -195,5 +199,28 @@ mod tests {
         assert!(r2.is_none());
 
         assert!(cfg.resolve_provider("nope").is_none());
+    }
+
+    #[test]
+    fn endpoint_joins_and_tolerates_full_url() {
+        let p = ProviderConfig {
+            base_url: "https://api.example.com/v1".into(),
+            ..ProviderConfig::demo()
+        };
+        assert_eq!(
+            p.endpoint("chat/completions"),
+            "https://api.example.com/v1/chat/completions"
+        );
+        assert_eq!(p.endpoint("/chat/completions"), p.endpoint("chat/completions"));
+
+        // 误填完整端点时不再重复拼接
+        let p2 = ProviderConfig {
+            base_url: "https://token.example.cn/v1/chat/completions".into(),
+            ..ProviderConfig::demo()
+        };
+        assert_eq!(
+            p2.endpoint("chat/completions"),
+            "https://token.example.cn/v1/chat/completions"
+        );
     }
 }

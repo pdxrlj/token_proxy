@@ -57,6 +57,15 @@ pub fn validate(cfg: &AppConfig) -> Result<(), String> {
         if !p.base_url.starts_with("http://") && !p.base_url.starts_with("https://") {
             return Err(format!("Provider '{}' 的 base_url 必须是 http(s):// 开头", p.name));
         }
+        // 常见误填：把完整端点当成 base_url
+        for bad in ["/chat/completions", "/v1/models", "/embeddings", "/completions"] {
+            if p.base_url.ends_with(bad) {
+                return Err(format!(
+                    "Provider '{}' 的 base_url 应填服务商根地址（如 https://api.openai.com/v1），不要带端点路径（{bad}）",
+                    p.name
+                ));
+            }
+        }
     }
     for r in &cfg.routes {
         if r.model.trim().is_empty() {

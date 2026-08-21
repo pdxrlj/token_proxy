@@ -196,7 +196,7 @@ export function Providers({ data }: { data: AppData }) {
               />
             </Field>
           </div>
-          <Field label="Base URL" help="OpenAI 兼容地址，含 /v1">
+          <Field label="Base URL" help="服务商根地址（如 https://api.openai.com/v1）。不要带 /chat/completions 等端点路径">
             <input
               className="input mono"
               value={editing.base_url}
