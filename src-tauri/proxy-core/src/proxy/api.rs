@@ -16,6 +16,10 @@ pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/v1/models", get(list_models))
+        // 兼容客户端把 base 配成不含 /v1 的情况
+        .route("/chat/completions", post(chat_completions))
+        .route("/completions", post(chat_completions))
+        .route("/models", get(list_models))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/completions", post(chat_completions))
         .route("/v1/embeddings", post(chat_completions))
