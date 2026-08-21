@@ -13,12 +13,16 @@ use futures_util::stream;
 use futures_util::stream::StreamExt;
 use serde_json::{Value, json};
 use std::convert::Infallible;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
 
-fn mock_router(counter: Arc<AtomicU32>) -> Router {
+/// mock 记录每次收到的请求体（用于断言重试时参数不丢失）
+type BodyRecorder = Arc<Mutex<Vec<Value>>>;
+
+fn mock_router(counter: Arc<AtomicU32>, recorder: Option<BodyRecorder>) -> Router {
     Router::new()
         .route(
             "/v1/models",
@@ -32,6 +36,9 @@ fn mock_router(counter: Arc<AtomicU32>) -> Router {
         .route(
             "/v1/chat/completions",
             post(move |Json(body): Json<Value>| async move {
+                if let Some(r) = &recorder {
+                    r.lock().unwrap().push(body.clone());
+                }
                 let count = counter.fetch_add(1, Ordering::SeqCst) + 1;
                 let fail_code = body.get("x_mock_fail").and_then(|v| v.as_u64());
                 let fail_n = body
@@ -97,10 +104,14 @@ fn mock_router(counter: Arc<AtomicU32>) -> Router {
 }
 
 async fn spawn_mock(port: u16, counter: Arc<AtomicU32>) {
+    spawn_mock_with_recorder(port, counter, None).await;
+}
+
+async fn spawn_mock_with_recorder(port: u16, counter: Arc<AtomicU32>, recorder: Option<BodyRecorder>) {
     let listener = TcpListener::bind(("127.0.0.1", port))
         .await
         .expect("bind mock port");
-    let app = mock_router(counter);
+    let app = mock_router(counter, recorder);
     tokio::spawn(async move {
         axum::serve(listener, app).await.expect("mock server");
     });
@@ -202,7 +213,8 @@ async fn smoke_full_chain() {
 
     // ---- 场景 C：前两次失败，重试后成功 ----
     let mock_counter2 = Arc::new(AtomicU32::new(0));
-    spawn_mock(9902, mock_counter2.clone()).await;
+    let recorder: BodyRecorder = Arc::new(Mutex::new(Vec::new()));
+    spawn_mock_with_recorder(9902, mock_counter2.clone(), Some(recorder.clone())).await;
     let state2 = spawn_proxy(8792, 9902, Some(3)).await;
     let mut body = chat_body(false);
     body["x_mock_fail_n"] = json!(2);
@@ -217,6 +229,17 @@ async fn smoke_full_chain() {
     let snap = state2.metrics.snapshot();
     assert_eq!(snap.retries, 2, "retry counter");
     assert_eq!(snap.total, 1);
+
+    // 重试不丢参数：三次收到的请求体必须完全一致（含原始 messages/stream 与注入的 x_mock_fail_n）
+    let received = recorder.lock().unwrap();
+    assert_eq!(received.len(), 3, "mock should receive 3 attempts");
+    assert_eq!(received[0], received[1], "retry must resend identical body");
+    assert_eq!(received[1], received[2], "retry must resend identical body");
+    assert_eq!(received[0]["messages"][0]["content"], "hi", "messages preserved");
+    assert_eq!(received[0]["stream"], json!(false), "stream flag preserved");
+    assert_eq!(received[0]["x_mock_fail_n"], json!(2), "injected field preserved");
+    assert!(received[0].get("model").is_some(), "model preserved");
+    drop(received);
 
     // ---- 场景 D：永远失败 → 重试耗尽 → 502 ----
     let mock_counter3 = Arc::new(AtomicU32::new(0));
