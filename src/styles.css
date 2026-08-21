@@ -725,6 +725,12 @@ body {
   background: var(--bg-2);
 }
 
+/* 可点击行（日志详情） */
+.table tbody tr.clickable,
+.log-row.clickable {
+  cursor: pointer;
+}
+
 .mono {
   font-family: var(--font-mono);
   font-size: 12.5px;

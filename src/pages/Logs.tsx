@@ -1,6 +1,8 @@
 import { useMemo, useState } from "react";
 import type { AppData } from "../hooks/useAppData";
+import type { RequestLog } from "../lib/types";
 import { fmtDuration, fmtTime } from "../components/ui";
+import { LogDetailModal } from "../components/LogDetail";
 import { Inbox, RefreshCw, ScrollText } from "lucide-react";
 
 type Filter = "all" | "ok" | "err" | "retry";
@@ -15,6 +17,7 @@ const FILTERS: { key: Filter; label: string }[] = [
 export function Logs({ data }: { data: AppData }) {
   const { metrics } = data;
   const [filter, setFilter] = useState<Filter>("all");
+  const [selected, setSelected] = useState<RequestLog | null>(null);
 
   const rows = useMemo(() => {
     const list = metrics.recent;
@@ -43,7 +46,7 @@ export function Logs({ data }: { data: AppData }) {
           </button>
         ))}
         <span style={{ marginLeft: "auto", color: "var(--text-3)", fontSize: 12 }}>
-          显示最近 {rows.length} / {metrics.recent.length} 条（服务重启后清空）
+          显示最近 {rows.length} / {metrics.recent.length} 条 · 点击行查看详情
         </span>
       </div>
 
@@ -59,11 +62,12 @@ export function Logs({ data }: { data: AppData }) {
           </div>
         ) : (
           <div style={{ overflowX: "auto" }}>
-            <table className="table" style={{ minWidth: 860 }}>
+            <table className="table" style={{ minWidth: 920 }}>
               <thead>
                 <tr>
                   <th>时间</th>
                   <th>状态</th>
+                  <th>重试</th>
                   <th>模型</th>
                   <th>端点</th>
                   <th>Provider</th>
@@ -74,7 +78,12 @@ export function Logs({ data }: { data: AppData }) {
               </thead>
               <tbody>
                 {rows.map((r) => (
-                  <tr key={r.id}>
+                  <tr
+                    key={r.id}
+                    onClick={() => setSelected(r)}
+                    title="点击查看详情"
+                    className="clickable"
+                  >
                     <td className="mono" style={{ color: "var(--text-3)" }}>{fmtTime(r.ts)}</td>
                     <td>
                       <span
@@ -83,13 +92,19 @@ export function Logs({ data }: { data: AppData }) {
                         } ${r.retries > 0 ? "retry" : ""}`}
                       >
                         {r.status}
-                        {r.retries > 0 && (
-                          <span style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
-                            <RefreshCw size={10} />
-                            {r.retries}
-                          </span>
-                        )}
                       </span>
+                    </td>
+                    <td>
+                      {r.retries > 0 ? (
+                        <span className="status-badge retry">
+                          <RefreshCw size={10} />
+                          {r.retries}
+                        </span>
+                      ) : (
+                        <span className="mono" style={{ color: "var(--text-3)" }}>
+                          —
+                        </span>
+                      )}
                     </td>
                     <td>
                       <span className="mono" style={{ fontWeight: 550 }}>{r.model || "—"}</span>
@@ -103,7 +118,7 @@ export function Logs({ data }: { data: AppData }) {
                     <td className="mono" style={{ textAlign: "right", color: "var(--text-3)" }}>
                       {r.tokens_in ?? "—"} / {r.tokens_out ?? "—"}
                     </td>
-                    <td className="mono" style={{ color: "var(--rose)", fontSize: 11.5, maxWidth: 220 }}>
+                    <td className="mono" style={{ color: "var(--rose)", fontSize: 11.5, maxWidth: 200 }}>
                       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "block" }} title={r.error ?? ""}>
                         {r.error ?? ""}
                       </span>
@@ -115,6 +130,8 @@ export function Logs({ data }: { data: AppData }) {
           </div>
         )}
       </div>
+
+      {selected && <LogDetailModal log={selected} onClose={() => setSelected(null)} />}
     </>
   );
 }

@@ -9,6 +9,7 @@ import {
   fmtTime,
   useToast,
 } from "../components/ui";
+import { LogDetailModal } from "../components/LogDetail";
 import {
   ArrowDownToLine,
   ArrowUpFromLine,
@@ -19,7 +20,7 @@ import {
   Waypoints,
   Zap,
 } from "lucide-react";
-import type { BreakerStateName } from "../lib/types";
+import type { BreakerStateName, RequestLog } from "../lib/types";
 
 function breakerColor(state?: BreakerStateName): "cyan" | "amber" | "rose" | "gray" {
   if (!state) return "cyan";
@@ -39,6 +40,7 @@ export function Overview({ data }: { data: AppData }) {
   const { config, status, metrics, breakers } = data;
   const toast = useToast();
   const [copied, setCopied] = useState(false);
+  const [detail, setDetail] = useState<RequestLog | null>(null);
 
   const endpoint = status ? `${status.host}:${status.port}` : "…";
   const successRate =
@@ -208,6 +210,7 @@ export function Overview({ data }: { data: AppData }) {
       <div className="card">
         <div className="card-header">
           <span className="card-title">最近请求</span>
+          <span style={{ color: "var(--text-3)", fontSize: 12 }}>点击行查看详情</span>
         </div>
         {recent.length === 0 ? (
           <div className="empty">
@@ -217,7 +220,12 @@ export function Overview({ data }: { data: AppData }) {
         ) : (
           <div className="log-list">
             {recent.map((r) => (
-              <div className="log-row" key={r.id}>
+              <div
+                className="log-row clickable"
+                key={r.id}
+                onClick={() => setDetail(r)}
+                title="点击查看详情"
+              >
                 <span className="time">{fmtTime(r.ts)}</span>
                 <span>
                   <span
@@ -241,6 +249,8 @@ export function Overview({ data }: { data: AppData }) {
           </div>
         )}
       </div>
+
+      {detail && <LogDetailModal log={detail} onClose={() => setDetail(null)} />}
     </>
   );
 }
