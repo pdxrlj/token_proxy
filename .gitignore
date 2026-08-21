@@ -18,3 +18,8 @@ Thumbs.db
 
 # 日志
 *.log
+
+# 预览截图与沙箱产物
+shots/
+pe-*.txt
+

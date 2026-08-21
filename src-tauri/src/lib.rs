@@ -1,11 +1,26 @@
-pub mod proxy;
-
-use proxy::config::AppConfig;
-use proxy::state::AppState;
-use proxy::store::{StatusDto, config_path, load_config, validate};
-use proxy::store::save_config as persist_config;
 use std::sync::Arc;
+
+use token_proxy_core::proxy::config::AppConfig;
+use token_proxy_core::proxy::state::{AppState, EventSink, RequestLog};
+use token_proxy_core::proxy::store::{StatusDto, config_path, load_config, validate};
+use token_proxy_core::proxy::store::save_config as persist_config;
 use tauri::Manager;
+
+/// 事件推送：core → 前端
+struct TauriSink {
+    app: tauri::AppHandle,
+}
+
+impl EventSink for TauriSink {
+    fn emit_log(&self, log: &RequestLog) {
+        use tauri::Emitter;
+        let _ = self.app.emit("proxy-log", log);
+    }
+    fn emit_config_changed(&self) {
+        use tauri::Emitter;
+        let _ = self.app.emit("config-changed", ());
+    }
+}
 
 /// 从磁盘重新加载配置（热重载/手动刷新）
 fn reload(state: &Arc<AppState>) -> Result<(), String> {
@@ -21,10 +36,7 @@ fn get_config(state: tauri::State<Arc<AppState>>) -> Result<AppConfig, String> {
 }
 
 #[tauri::command]
-fn save_config(
-    state: tauri::State<Arc<AppState>>,
-    cfg: AppConfig,
-) -> Result<(), String> {
+fn save_config(state: tauri::State<Arc<AppState>>, cfg: AppConfig) -> Result<(), String> {
     validate(&cfg)?;
     let path = state.config_path.clone();
     persist_config(&path, &cfg)?;
@@ -54,15 +66,14 @@ fn get_status(state: tauri::State<Arc<AppState>>) -> Result<StatusDto, String> {
 }
 
 #[tauri::command]
-fn get_metrics(state: tauri::State<Arc<AppState>>) -> Result<proxy::state::MetricsSnapshot, String> {
+fn get_metrics(
+    state: tauri::State<Arc<AppState>>,
+) -> Result<token_proxy_core::proxy::state::MetricsSnapshot, String> {
     Ok(state.metrics.snapshot())
 }
 
 #[tauri::command]
-fn reset_breaker(
-    state: tauri::State<Arc<AppState>>,
-    provider_id: String,
-) -> Result<(), String> {
+fn reset_breaker(state: tauri::State<Arc<AppState>>, provider_id: String) -> Result<(), String> {
     if let Some(b) = state.breakers.get(&provider_id) {
         b.reset();
     }
@@ -70,9 +81,7 @@ fn reset_breaker(
 }
 
 #[tauri::command]
-fn get_breaker_status(
-    state: tauri::State<Arc<AppState>>,
-) -> Result<serde_json::Value, String> {
+fn get_breaker_status(state: tauri::State<Arc<AppState>>) -> Result<serde_json::Value, String> {
     let mut map = serde_json::Map::new();
     for entry in state.breakers.iter() {
         let s = entry.value().status();
@@ -80,9 +89,9 @@ fn get_breaker_status(
             entry.key().clone(),
             serde_json::json!({
                 "state": match s.state {
-                    proxy::circuit::BreakerState::Closed => "closed",
-                    proxy::circuit::BreakerState::Open => "open",
-                    proxy::circuit::BreakerState::HalfOpen => "half_open",
+                    token_proxy_core::proxy::circuit::BreakerState::Closed => "closed",
+                    token_proxy_core::proxy::circuit::BreakerState::Open => "open",
+                    token_proxy_core::proxy::circuit::BreakerState::HalfOpen => "half_open",
                 },
                 "consecutive_failures": s.consecutive_failures,
             }),
@@ -111,14 +120,15 @@ pub fn run() {
             tracing::info!("config at {}", path.display());
 
             let state = Arc::new(AppState::new(cfg, path));
-            // 注入 AppHandle 用于事件推送
-            *state.app.lock() = Some(app.handle().clone());
+            *state.sink.lock() = Some(Arc::new(TauriSink {
+                app: app.handle().clone(),
+            }));
             app.manage(state.clone());
 
             // 启动代理服务器（后台任务）
             let server_state = state.clone();
             tauri::async_runtime::spawn(async move {
-                if let Err(e) = proxy::serve(server_state).await {
+                if let Err(e) = token_proxy_core::proxy::serve(server_state).await {
                     tracing::error!("proxy server exited: {e}");
                 }
             });
@@ -127,25 +137,23 @@ pub fn run() {
             let watch_state = state.clone();
             tauri::async_runtime::spawn(async move {
                 use notify::{Watcher, RecursiveMode, recommended_watcher};
-                let watch_dir = watch_state
-                    .config_path
-                    .parent()
-                    .map(|p| p.to_path_buf());
-                let mut watcher = match recommended_watcher(move |res: notify::Result<notify::Event>| {
-                    if let Ok(ev) = res {
-                        if ev.kind.is_modify() || ev.kind.is_create() {
-                            if let Err(e) = reload(&watch_state) {
-                                tracing::warn!("config hot-reload failed: {e}");
-                            } else {
-                                tracing::info!("config hot-reloaded");
-                                use tauri::Emitter;
-                                if let Some(app) = watch_state.app.lock().as_ref() {
-                                    let _ = app.emit("config-changed", ());
+                let watch_dir = watch_state.config_path.parent().map(|p| p.to_path_buf());
+                let mut watcher = match recommended_watcher(
+                    move |res: notify::Result<notify::Event>| {
+                        if let Ok(ev) = res {
+                            if ev.kind.is_modify() || ev.kind.is_create() {
+                                if let Err(e) = reload(&watch_state) {
+                                    tracing::warn!("config hot-reload failed: {e}");
+                                } else {
+                                    tracing::info!("config hot-reloaded");
+                                    if let Some(s) = watch_state.sink.lock().as_ref() {
+                                        s.emit_config_changed();
+                                    }
                                 }
                             }
                         }
-                    }
-                }) {
+                    },
+                ) {
                     Ok(w) => w,
                     Err(e) => {
                         tracing::warn!("watcher setup failed: {e}");

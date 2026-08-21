@@ -1,0 +1,14 @@
+F:\code\token_proxy\src-tauri\proxy-core\target\debug\deps\serde-d6df4dea00e1af78.d: F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\serde-1.0.229\src\lib.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\serde-1.0.229\src\integer128.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\serde-1.0.229\src\private\mod.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\serde-1.0.229\src\private\de.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\serde-1.0.229\src\private\ser.rs F:\code\token_proxy\src-tauri\proxy-core\target\debug\build\serde-774097fa1c790350\out/private.rs
+
+F:\code\token_proxy\src-tauri\proxy-core\target\debug\deps\libserde-d6df4dea00e1af78.rlib: F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\serde-1.0.229\src\lib.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\serde-1.0.229\src\integer128.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\serde-1.0.229\src\private\mod.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\serde-1.0.229\src\private\de.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\serde-1.0.229\src\private\ser.rs F:\code\token_proxy\src-tauri\proxy-core\target\debug\build\serde-774097fa1c790350\out/private.rs
+
+F:\code\token_proxy\src-tauri\proxy-core\target\debug\deps\libserde-d6df4dea00e1af78.rmeta: F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\serde-1.0.229\src\lib.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\serde-1.0.229\src\integer128.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\serde-1.0.229\src\private\mod.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\serde-1.0.229\src\private\de.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\serde-1.0.229\src\private\ser.rs F:\code\token_proxy\src-tauri\proxy-core\target\debug\build\serde-774097fa1c790350\out/private.rs
+
+F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\serde-1.0.229\src\lib.rs:
+F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\serde-1.0.229\src\integer128.rs:
+F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\serde-1.0.229\src\private\mod.rs:
+F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\serde-1.0.229\src\private\de.rs:
+F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\serde-1.0.229\src\private\ser.rs:
+F:\code\token_proxy\src-tauri\proxy-core\target\debug\build\serde-774097fa1c790350\out/private.rs:
+
+# env-dep:OUT_DIR=F:\\code\\token_proxy\\src-tauri\\proxy-core\\target\\debug\\build\\serde-774097fa1c790350\\out

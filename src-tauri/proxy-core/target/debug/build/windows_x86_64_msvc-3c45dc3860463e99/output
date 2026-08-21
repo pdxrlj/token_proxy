@@ -1,0 +1,1 @@
+cargo:rustc-link-search=native=F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\windows_x86_64_msvc-0.52.6\lib

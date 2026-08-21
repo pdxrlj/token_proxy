@@ -3929,6 +3929,21 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 name = "token-proxy"
 version = "0.1.0"
 dependencies = [
+ "notify",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "token-proxy-core",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "token-proxy-core"
+version = "0.1.0"
+dependencies = [
  "async-stream",
  "axum",
  "backon",
@@ -3941,14 +3956,10 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
- "tauri",
- "tauri-build",
  "thiserror 2.0.20",
  "tokio",
- "tower",
  "tower-http",
  "tracing",
- "tracing-subscriber",
  "uuid",
 ]
 

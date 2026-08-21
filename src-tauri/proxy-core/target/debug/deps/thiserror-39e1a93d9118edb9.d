@@ -1,0 +1,14 @@
+F:\code\token_proxy\src-tauri\proxy-core\target\debug\deps\thiserror-39e1a93d9118edb9.d: F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\thiserror-2.0.20\src\lib.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\thiserror-2.0.20\src\aserror.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\thiserror-2.0.20\src\display.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\thiserror-2.0.20\src\var.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\thiserror-2.0.20\src\private.rs F:\code\token_proxy\src-tauri\proxy-core\target\debug\build\thiserror-dfe03985b4d897cf\out/private.rs
+
+F:\code\token_proxy\src-tauri\proxy-core\target\debug\deps\libthiserror-39e1a93d9118edb9.rlib: F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\thiserror-2.0.20\src\lib.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\thiserror-2.0.20\src\aserror.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\thiserror-2.0.20\src\display.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\thiserror-2.0.20\src\var.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\thiserror-2.0.20\src\private.rs F:\code\token_proxy\src-tauri\proxy-core\target\debug\build\thiserror-dfe03985b4d897cf\out/private.rs
+
+F:\code\token_proxy\src-tauri\proxy-core\target\debug\deps\libthiserror-39e1a93d9118edb9.rmeta: F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\thiserror-2.0.20\src\lib.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\thiserror-2.0.20\src\aserror.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\thiserror-2.0.20\src\display.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\thiserror-2.0.20\src\var.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\thiserror-2.0.20\src\private.rs F:\code\token_proxy\src-tauri\proxy-core\target\debug\build\thiserror-dfe03985b4d897cf\out/private.rs
+
+F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\thiserror-2.0.20\src\lib.rs:
+F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\thiserror-2.0.20\src\aserror.rs:
+F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\thiserror-2.0.20\src\display.rs:
+F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\thiserror-2.0.20\src\var.rs:
+F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\thiserror-2.0.20\src\private.rs:
+F:\code\token_proxy\src-tauri\proxy-core\target\debug\build\thiserror-dfe03985b4d897cf\out/private.rs:
+
+# env-dep:OUT_DIR=F:\\code\\token_proxy\\src-tauri\\proxy-core\\target\\debug\\build\\thiserror-dfe03985b4d897cf\\out

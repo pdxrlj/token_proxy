@@ -13,19 +13,62 @@
 - SSE 流式（`stream: true`）逐行转发，断流返回错误事件，自动统计 token 用量
 - 失败重试：可配置重试次数/退避/可重试状态码；网络错误、429、5xx 自动重试，
   4xx 业务错误不重试；指数退避 + 抖动
-- 熔断器：上游连续失败达阈值后熔断冷却，半开试探自动恢复
+- 熔断器：上游连续失败达阈值后熔断冷却，半开试探自动恢复（每 Provider 独立）
 - 多 Provider + 路由表：模型 → 上游映射，支持参数改写（temperature/max_tokens 等）
 - 配置热重载：修改配置文件即时生效，无需重启
-- 桌面 GUI：总览/Provider/路由/日志/设置五个页面，实时请求流、熔断状态展示
+- 桌面 GUI：总览 / 上游 Provider / 路由 / 请求日志 / 重试与设置五个页面，
+  实时请求流、路由链路图、熔断状态展示
+- 本地鉴权：可选的 `local_api_key`，默认仅本机可访问
 
 ## 开发
 
 ```bash
-# 前置：Rust nightly 不需要；Node 18+；Windows 需 WebView2（Win10/11 自带）
+# 前置：Rust 1.77+、Node 18+、Windows 需 WebView2（Win10/11 自带）
 
 npm install
-npm run tauri dev      # 开发模式（vite + cargo）
+npm run tauri dev      # 开发模式（vite + cargo 热重载）
 npm run tauri build    # 打包安装程序
+```
+
+**纯前端预览**（不需要 Tauri 环境，mock 数据驱动）：
+
+```bash
+npm run build && npm run preview
+# 打开 http://localhost:4173 —— 非 Tauri 环境自动注入示例数据
+```
+
+**测试**：
+
+```bash
+# 代理核心：单元测试 + 端到端冒烟（转发/流式/重试/熔断，内置 mock 上游）
+cd src-tauri/proxy-core && cargo test
+```
+
+## 架构
+
+```
+src-tauri/
+├── proxy-core/            # 独立 crate：代理内核（不依赖 Tauri，可单独测试）
+│   └── src/proxy/
+│       ├── api.rs         # axum 路由 + OpenAI 兼容端点（含 SSE 流式）
+│       ├── upstream.rs    # 上游转发：非流式 JSON / SSE 逐行透传 / token 统计
+│       ├── retry.rs       # 重试语义判断 + 指数退避抖动
+│       ├── circuit.rs     # 熔断器（每 Provider 独立，Arc 共享实例）
+│       ├── config.rs      # Provider / 路由 / 重试策略配置模型
+│       ├── store.rs       # 配置读写（原子写）与校验
+│       └── state.rs       # 共享状态 + 指标 + 事件推送抽象(EventSink)
+└── src/                   # Tauri 壳：IPC 命令 + 事件桥 + 配置热重载
+    └── lib.rs
+
+Tauri 2 桌面壳 (React)
+   │  IPC (invoke / event)
+   ▼
+proxy-core (Rust, 127.0.0.1:8787)
+   ├─ /v1/* OpenAI 兼容端点（SSE 流式透传）
+   ├─ 路由表 → Provider 适配（base_url + api_key + 参数改写）
+   ├─ 重试循环：指数退避 + 抖动（429/5xx/网络错误）
+   ├─ 熔断器（连续失败阈值 → 冷却 → 半开试探）
+   └─ 指标 / 请求日志（EventSink 推送到 GUI）
 ```
 
 ## 配置
@@ -64,23 +107,19 @@ npm run tauri build    # 打包安装程序
 ## 快速试用
 
 ```bash
-# 添加一个本地 mock 上游验证代理：
-# 1. 在 GUI「上游 Provider」添加 base_url 指向任意 OpenAI 兼容服务
-# 2. curl http://127.0.0.1:8787/v1/chat/completions \
-#      -H 'Content-Type: application/json' \
-#      -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}'
+# 1. 应用内「上游 Provider」添加任意 OpenAI 兼容服务并启用
+# 2. 用任意客户端调用：
+curl http://127.0.0.1:8787/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}'
 ```
 
-## 架构
+## 常见问题
 
-```
-Tauri 2 桌面壳 (React)
-   │  IPC (invoke / event)
-   ▼
-Axum 代理内核 (Rust, 127.0.0.1:8787)
-   ├─ /v1/* OpenAI 兼容端点（含 SSE 流式）
-   ├─ 路由表 → Provider 适配（base_url + api_key）
-   ├─ 重试循环：指数退避 + 抖动
-   ├─ 熔断器（每 Provider 独立）
-   └─ 指标/请求日志（推送到 GUI）
-```
+- **cargo 报 `SEC_E_NO_CREDENTIALS`（schannel TLS 失败）**：个别受限网络下
+  Windows 的 schannel 不可用。可运行 `node scripts/crates-proxy.mjs` 起本地
+  镜像（Node OpenSSL 上行），并参考 `.cargo/config.toml` 把 crates.io 指向
+  `sparse+http://127.0.0.1:8765/index/`。
+- **Node spawn EPERM（沙箱/受限环境）**：vite/esbuild 需要 spawn 子进程；
+  若被环境拦截，前端构建可用 `node --import ./scripts/esbuild-wasm-loader.mjs
+  node_modules/vite/bin/vite.js build` 降级为 WASM 模式（无需 spawn）。

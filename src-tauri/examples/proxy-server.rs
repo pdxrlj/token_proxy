@@ -1,9 +1,10 @@
 // 独立启动代理服务器（无 GUI），用于冒烟测试：
-// cargo run --example proxy-server
+// cargo run --example proxy-server --manifest-path src-tauri/Cargo.toml
+// （在 proxy-core crate 内测试请用：cargo test -p token-proxy-core -- smoke_full_chain）
 use std::path::PathBuf;
 use std::sync::Arc;
-use token_proxy_lib::proxy::config::{AppConfig, ProviderConfig};
-use token_proxy_lib::proxy::state::AppState;
+use token_proxy_core::proxy::config::{AppConfig, ProviderConfig, RouteConfig};
+use token_proxy_core::proxy::state::AppState;
 
 #[tokio::main]
 async fn main() {
@@ -22,14 +23,14 @@ async fn main() {
         enabled: true,
         models: vec!["mock-model".into(), "gpt-4o".into()],
     }];
-    cfg.routes = vec![token_proxy_lib::proxy::config::RouteConfig {
+    cfg.routes = vec![RouteConfig {
         model: "gpt-4o".into(),
         provider: "mock".into(),
         overrides: serde_json::Map::new(),
     }];
 
     let state = Arc::new(AppState::new(cfg, PathBuf::from("smoke-config.json")));
-    token_proxy_lib::proxy::serve(state)
+    token_proxy_core::proxy::serve(state)
         .await
         .expect("proxy server exited");
 }

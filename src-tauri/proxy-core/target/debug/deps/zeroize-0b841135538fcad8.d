@@ -1,0 +1,11 @@
+F:\code\token_proxy\src-tauri\proxy-core\target\debug\deps\zeroize-0b841135538fcad8.d: F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\zeroize-1.9.0\src\lib.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\zeroize-1.9.0\src\x86.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\zeroize-1.9.0\src\barrier.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\zeroize-1.9.0\src\stack.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\zeroize-1.9.0\src\../README.md
+
+F:\code\token_proxy\src-tauri\proxy-core\target\debug\deps\libzeroize-0b841135538fcad8.rlib: F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\zeroize-1.9.0\src\lib.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\zeroize-1.9.0\src\x86.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\zeroize-1.9.0\src\barrier.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\zeroize-1.9.0\src\stack.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\zeroize-1.9.0\src\../README.md
+
+F:\code\token_proxy\src-tauri\proxy-core\target\debug\deps\libzeroize-0b841135538fcad8.rmeta: F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\zeroize-1.9.0\src\lib.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\zeroize-1.9.0\src\x86.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\zeroize-1.9.0\src\barrier.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\zeroize-1.9.0\src\stack.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\zeroize-1.9.0\src\../README.md
+
+F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\zeroize-1.9.0\src\lib.rs:
+F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\zeroize-1.9.0\src\x86.rs:
+F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\zeroize-1.9.0\src\barrier.rs:
+F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\zeroize-1.9.0\src\stack.rs:
+F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\zeroize-1.9.0\src\../README.md:

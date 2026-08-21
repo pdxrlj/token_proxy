@@ -23,6 +23,7 @@
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.3.4",
     "esbuild-wasm": "^0.24.2",
+    "playwright-core": "^1.62.1",
     "typescript": "^5.7.2",
     "vite": "^6.0.0"
   }

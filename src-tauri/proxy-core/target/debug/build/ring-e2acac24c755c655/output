@@ -1,0 +1,221 @@
+cargo:rerun-if-env-changed=CARGO_MANIFEST_DIR
+cargo:rerun-if-env-changed=CARGO_PKG_NAME
+cargo:rerun-if-env-changed=CARGO_PKG_VERSION_MAJOR
+cargo:rerun-if-env-changed=CARGO_PKG_VERSION_MINOR
+cargo:rerun-if-env-changed=CARGO_PKG_VERSION_PATCH
+cargo:rerun-if-env-changed=CARGO_PKG_VERSION_PRE
+cargo:rerun-if-env-changed=CARGO_MANIFEST_LINKS
+cargo:rerun-if-env-changed=RING_PREGENERATE_ASM
+cargo:rerun-if-env-changed=OUT_DIR
+cargo:rerun-if-env-changed=CARGO_CFG_TARGET_ARCH
+cargo:rerun-if-env-changed=CARGO_CFG_TARGET_OS
+cargo:rerun-if-env-changed=CARGO_CFG_TARGET_ENV
+cargo:rerun-if-env-changed=CARGO_CFG_TARGET_ENDIAN
+cargo:rerun-if-env-changed=VCINSTALLDIR
+VCINSTALLDIR = None
+cargo:rerun-if-env-changed=VSTEL_MSBuildProjectFullPath
+VSTEL_MSBuildProjectFullPath = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(F:\code\token_proxy\src-tauri\proxy-core\target\debug;F:\code\token_proxy\src-tauri\proxy-core\target\debug\deps;C:\Users\Administrator\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;F:\code\token_proxy\.cargo-home\bin;C:\Program Files\PowerShell\7;C:\Users\Administrator\AppData\Local\npm-cache\_npx\1e7f6d9597241db0\node_modules\.bin;F:\code\token_proxy\node_modules\.bin;F:\code\node_modules\.bin;F:\node_modules\.bin;E:\software\node\node_modules\npm\node_modules\@npmcli\run-script\lib\node-gyp-bin;C:\Users\Administrator\scoop\shims;C:\Users\Administrator\scoop\persist\uv\tools\shims;C:\Program Files\PowerShell\7;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\bin\x64;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\bin;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\libnvvp;C:\Python314\Scripts\;C:\Python314\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\dotnet\;C:\Program Files\NVIDIA Corporation\NVIDIA App\NvDLISR;C:\Program Files (x86)\NVIDIA Corporation\PhysX\Common;C:\Users\Administrator\AppData\Local\Programs\oh-my-posh\bin;C:\Users\Administrator\.cargo\bin;C:\Users\Administrator\.local\bin;C:\Program Files (x86)\Windows Kits\10\Windows Performance Toolkit\;E:\software\node\;C:\ProgramData\chocolatey\bin;C:\cygwin64\bin;C:\msys64\mingw64\bin;C:\Users\Administrator\scoop\apps\git\2.51.0.2\mingw64\bin;C:\cygwin64\lib\pkgconfig;C:\cygwin64\bin;E:\software\llama-b7211-bin-win-cuda-12.4-x64;C:\Users\Administrator\Desktop\dingo;E:\software\platform-tools;C:\Program Files\cursor\resources\app\bin;C:\Program Files\Go\bin;C:\Program Files\Rancher Desktop\resources\resources\win32\bin\;C:\Program Files\Rancher Desktop\resources\resources\win32\docker-cli-plugins\;C:\Program Files\Rancher Desktop\resources\resources\linux\bin\;C:\Program Files\Rancher Desktop\resources\resources\linux\docker-cli-plugins\;E:\software\WezTerm;E:\software\QoderCN\bin;C:\Program Files\NVIDIA Corporation\Nsight Compute 2026.2.1\;C:\Program Files\NVIDIA GPU Computing Toolkit\cudnn-windows-x86_64-9.25.0.15_cuda12-archive\bin\x64;E:\software\llama-b10355-bin-win-cuda-13.3-x64;E:\software\Strawberry\c\bin;E:\software\Strawberry\perl\site\bin;E:\software\Strawberry\perl\bin;C:\Program Files\PowerShell\7\;C:\Users\Administrator\scoop\persist\uv\python\shims;C:\Users\Administrator\.rustup\toolchains\esp\xtensa-esp32-elf-clang\esp-clang\bin;C:\Users\Administrator\.rustup\toolchains\esp\xtensa-esp-elf\bin;C:\Users\Administrator\AppData\Local\pnpm;e:\software\Trae CN\bin;C:\Users\Administrator\scoop\apps\openjdk21\current\bin;C:\Users\Administrator\scoop\apps\maven\current\bin;C:\Users\Administrator\AppData\Local\Programs\oh-my-posh\bin\;C:\Users\Administrator\.local\bin;E:\software\miniconda3;E:\software\miniconda3\Library\mingw-w64\bin;E:\software\miniconda3\Library\usr\bin;E:\software\miniconda3\Library\bin;E:\software\miniconda3\Scripts;C:\Users\Administrator\scoop\apps\mingw\current\bin;C:\Users\Administrator\.cargo\bin;C:\Users\Administrator\AppData\Local\Microsoft\WindowsApps;E:\software\PyCharm 2025.2.3\bin;C:\Users\Administrator\AppData\Local\Programs\Ollama;C:\Users\Administrator\go\bin;E:\software\DataGrip 2025.2.4\bin;E:\software\Windsurf\bin;C:\Users\Administrator\AppData\Local\Microsoft\WindowsApps;E:\software\RustRover 2025.2.3\bin;E:\software\Zed\bin;C:\Users\Administrator\AppData\Roaming\npm;E:\software\Microsoft VS Code\bin;E:\software\JetBrains Gateway 2025.2.5\bin;E:\software\dingo;E:\software\GoLand 2025.3\bin;E:\software\PyCharm 2025.3.1.1\bin;C:\WINDOWS\System32\Wbem;C:\Users\Administrator\go\bin;C:\Users\Administrator\.cherrystudio\bin;E:\software\CodeBuddy CN\bin;E:\software\DataGrip 2026.1.3\bin;C:\Users\Administrator\AppData\Local\PowerToys\DSCModules\;C:\Users\Administrator\.lmstudio\bin;C:\Users\Administrator\.qoder\bin\qodercli;C:\Users\Administrator\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(F:\code\token_proxy\src-tauri\proxy-core\target\debug;F:\code\token_proxy\src-tauri\proxy-core\target\debug\deps;C:\Users\Administrator\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;F:\code\token_proxy\.cargo-home\bin;C:\Program Files\PowerShell\7;C:\Users\Administrator\AppData\Local\npm-cache\_npx\1e7f6d9597241db0\node_modules\.bin;F:\code\token_proxy\node_modules\.bin;F:\code\node_modules\.bin;F:\node_modules\.bin;E:\software\node\node_modules\npm\node_modules\@npmcli\run-script\lib\node-gyp-bin;C:\Users\Administrator\scoop\shims;C:\Users\Administrator\scoop\persist\uv\tools\shims;C:\Program Files\PowerShell\7;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\bin\x64;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\bin;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\libnvvp;C:\Python314\Scripts\;C:\Python314\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\dotnet\;C:\Program Files\NVIDIA Corporation\NVIDIA App\NvDLISR;C:\Program Files (x86)\NVIDIA Corporation\PhysX\Common;C:\Users\Administrator\AppData\Local\Programs\oh-my-posh\bin;C:\Users\Administrator\.cargo\bin;C:\Users\Administrator\.local\bin;C:\Program Files (x86)\Windows Kits\10\Windows Performance Toolkit\;E:\software\node\;C:\ProgramData\chocolatey\bin;C:\cygwin64\bin;C:\msys64\mingw64\bin;C:\Users\Administrator\scoop\apps\git\2.51.0.2\mingw64\bin;C:\cygwin64\lib\pkgconfig;C:\cygwin64\bin;E:\software\llama-b7211-bin-win-cuda-12.4-x64;C:\Users\Administrator\Desktop\dingo;E:\software\platform-tools;C:\Program Files\cursor\resources\app\bin;C:\Program Files\Go\bin;C:\Program Files\Rancher Desktop\resources\resources\win32\bin\;C:\Program Files\Rancher Desktop\resources\resources\win32\docker-cli-plugins\;C:\Program Files\Rancher Desktop\resources\resources\linux\bin\;C:\Program Files\Rancher Desktop\resources\resources\linux\docker-cli-plugins\;E:\software\WezTerm;E:\software\QoderCN\bin;C:\Program Files\NVIDIA Corporation\Nsight Compute 2026.2.1\;C:\Program Files\NVIDIA GPU Computing Toolkit\cudnn-windows-x86_64-9.25.0.15_cuda12-archive\bin\x64;E:\software\llama-b10355-bin-win-cuda-13.3-x64;E:\software\Strawberry\c\bin;E:\software\Strawberry\perl\site\bin;E:\software\Strawberry\perl\bin;C:\Program Files\PowerShell\7\;C:\Users\Administrator\scoop\persist\uv\python\shims;C:\Users\Administrator\.rustup\toolchains\esp\xtensa-esp32-elf-clang\esp-clang\bin;C:\Users\Administrator\.rustup\toolchains\esp\xtensa-esp-elf\bin;C:\Users\Administrator\AppData\Local\pnpm;e:\software\Trae CN\bin;C:\Users\Administrator\scoop\apps\openjdk21\current\bin;C:\Users\Administrator\scoop\apps\maven\current\bin;C:\Users\Administrator\AppData\Local\Programs\oh-my-posh\bin\;C:\Users\Administrator\.local\bin;E:\software\miniconda3;E:\software\miniconda3\Library\mingw-w64\bin;E:\software\miniconda3\Library\usr\bin;E:\software\miniconda3\Library\bin;E:\software\miniconda3\Scripts;C:\Users\Administrator\scoop\apps\mingw\current\bin;C:\Users\Administrator\.cargo\bin;C:\Users\Administrator\AppData\Local\Microsoft\WindowsApps;E:\software\PyCharm 2025.2.3\bin;C:\Users\Administrator\AppData\Local\Programs\Ollama;C:\Users\Administrator\go\bin;E:\software\DataGrip 2025.2.4\bin;E:\software\Windsurf\bin;C:\Users\Administrator\AppData\Local\Microsoft\WindowsApps;E:\software\RustRover 2025.2.3\bin;E:\software\Zed\bin;C:\Users\Administrator\AppData\Roaming\npm;E:\software\Microsoft VS Code\bin;E:\software\JetBrains Gateway 2025.2.5\bin;E:\software\dingo;E:\software\GoLand 2025.3\bin;E:\software\PyCharm 2025.3.1.1\bin;C:\WINDOWS\System32\Wbem;C:\Users\Administrator\go\bin;C:\Users\Administrator\.cherrystudio\bin;E:\software\CodeBuddy CN\bin;E:\software\DataGrip 2026.1.3\bin;C:\Users\Administrator\AppData\Local\PowerToys\DSCModules\;C:\Users\Administrator\.lmstudio\bin;C:\Users\Administrator\.qoder\bin\qodercli;C:\Users\Administrator\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=CC_x86_64-pc-windows-msvc
+CC_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_x86_64_pc_windows_msvc
+CC_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64_pc_windows_msvc
+CFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64-pc-windows-msvc
+CFLAGS_x86_64-pc-windows-msvc = None
+curve25519.c
+F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\ring-0.17.14\crypto\curve25519\./curve25519_tables.h(1): warning C4819: The file contains a character that cannot be represented in the current code page (936). Save the file in Unicode format to prevent data loss
+F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\ring-0.17.14\crypto\curve25519\../../third_party/fiat/curve25519_64_msvc.h(1): warning C4819: The file contains a character that cannot be represented in the current code page (936). Save the file in Unicode format to prevent data loss
+aes_nohw.c
+montgomery.c
+montgomery_inv.c
+ecp_nistz.c
+F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\ring-0.17.14\crypto\fipsmodule\ec\ecp_nistz.h(1): warning C4819: The file contains a character that cannot be represented in the current code page (936). Save the file in Unicode format to prevent data loss
+gfp_p256.c
+gfp_p384.c
+F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\ring-0.17.14\crypto\fipsmodule\ec\ecp_nistz.h(1): warning C4819: The file contains a character that cannot be represented in the current code page (936). Save the file in Unicode format to prevent data loss
+p256.c
+F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\ring-0.17.14\crypto\fipsmodule\ec\./util.h(1): warning C4819: The file contains a character that cannot be represented in the current code page (936). Save the file in Unicode format to prevent data loss
+limbs.c
+mem.c
+poly1305.c
+crypto.c
+cpu_intel.c
+curve25519_64_adx.c
+p256-nistz.c
+cargo:rustc-link-lib=static=ring_core_0_17_14_
+cargo:rerun-if-env-changed=VCINSTALLDIR
+VCINSTALLDIR = None
+cargo:rerun-if-env-changed=VSTEL_MSBuildProjectFullPath
+VSTEL_MSBuildProjectFullPath = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(F:\code\token_proxy\src-tauri\proxy-core\target\debug;F:\code\token_proxy\src-tauri\proxy-core\target\debug\deps;C:\Users\Administrator\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;F:\code\token_proxy\.cargo-home\bin;C:\Program Files\PowerShell\7;C:\Users\Administrator\AppData\Local\npm-cache\_npx\1e7f6d9597241db0\node_modules\.bin;F:\code\token_proxy\node_modules\.bin;F:\code\node_modules\.bin;F:\node_modules\.bin;E:\software\node\node_modules\npm\node_modules\@npmcli\run-script\lib\node-gyp-bin;C:\Users\Administrator\scoop\shims;C:\Users\Administrator\scoop\persist\uv\tools\shims;C:\Program Files\PowerShell\7;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\bin\x64;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\bin;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\libnvvp;C:\Python314\Scripts\;C:\Python314\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\dotnet\;C:\Program Files\NVIDIA Corporation\NVIDIA App\NvDLISR;C:\Program Files (x86)\NVIDIA Corporation\PhysX\Common;C:\Users\Administrator\AppData\Local\Programs\oh-my-posh\bin;C:\Users\Administrator\.cargo\bin;C:\Users\Administrator\.local\bin;C:\Program Files (x86)\Windows Kits\10\Windows Performance Toolkit\;E:\software\node\;C:\ProgramData\chocolatey\bin;C:\cygwin64\bin;C:\msys64\mingw64\bin;C:\Users\Administrator\scoop\apps\git\2.51.0.2\mingw64\bin;C:\cygwin64\lib\pkgconfig;C:\cygwin64\bin;E:\software\llama-b7211-bin-win-cuda-12.4-x64;C:\Users\Administrator\Desktop\dingo;E:\software\platform-tools;C:\Program Files\cursor\resources\app\bin;C:\Program Files\Go\bin;C:\Program Files\Rancher Desktop\resources\resources\win32\bin\;C:\Program Files\Rancher Desktop\resources\resources\win32\docker-cli-plugins\;C:\Program Files\Rancher Desktop\resources\resources\linux\bin\;C:\Program Files\Rancher Desktop\resources\resources\linux\docker-cli-plugins\;E:\software\WezTerm;E:\software\QoderCN\bin;C:\Program Files\NVIDIA Corporation\Nsight Compute 2026.2.1\;C:\Program Files\NVIDIA GPU Computing Toolkit\cudnn-windows-x86_64-9.25.0.15_cuda12-archive\bin\x64;E:\software\llama-b10355-bin-win-cuda-13.3-x64;E:\software\Strawberry\c\bin;E:\software\Strawberry\perl\site\bin;E:\software\Strawberry\perl\bin;C:\Program Files\PowerShell\7\;C:\Users\Administrator\scoop\persist\uv\python\shims;C:\Users\Administrator\.rustup\toolchains\esp\xtensa-esp32-elf-clang\esp-clang\bin;C:\Users\Administrator\.rustup\toolchains\esp\xtensa-esp-elf\bin;C:\Users\Administrator\AppData\Local\pnpm;e:\software\Trae CN\bin;C:\Users\Administrator\scoop\apps\openjdk21\current\bin;C:\Users\Administrator\scoop\apps\maven\current\bin;C:\Users\Administrator\AppData\Local\Programs\oh-my-posh\bin\;C:\Users\Administrator\.local\bin;E:\software\miniconda3;E:\software\miniconda3\Library\mingw-w64\bin;E:\software\miniconda3\Library\usr\bin;E:\software\miniconda3\Library\bin;E:\software\miniconda3\Scripts;C:\Users\Administrator\scoop\apps\mingw\current\bin;C:\Users\Administrator\.cargo\bin;C:\Users\Administrator\AppData\Local\Microsoft\WindowsApps;E:\software\PyCharm 2025.2.3\bin;C:\Users\Administrator\AppData\Local\Programs\Ollama;C:\Users\Administrator\go\bin;E:\software\DataGrip 2025.2.4\bin;E:\software\Windsurf\bin;C:\Users\Administrator\AppData\Local\Microsoft\WindowsApps;E:\software\RustRover 2025.2.3\bin;E:\software\Zed\bin;C:\Users\Administrator\AppData\Roaming\npm;E:\software\Microsoft VS Code\bin;E:\software\JetBrains Gateway 2025.2.5\bin;E:\software\dingo;E:\software\GoLand 2025.3\bin;E:\software\PyCharm 2025.3.1.1\bin;C:\WINDOWS\System32\Wbem;C:\Users\Administrator\go\bin;C:\Users\Administrator\.cherrystudio\bin;E:\software\CodeBuddy CN\bin;E:\software\DataGrip 2026.1.3\bin;C:\Users\Administrator\AppData\Local\PowerToys\DSCModules\;C:\Users\Administrator\.lmstudio\bin;C:\Users\Administrator\.qoder\bin\qodercli;C:\Users\Administrator\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(F:\code\token_proxy\src-tauri\proxy-core\target\debug;F:\code\token_proxy\src-tauri\proxy-core\target\debug\deps;C:\Users\Administrator\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;F:\code\token_proxy\.cargo-home\bin;C:\Program Files\PowerShell\7;C:\Users\Administrator\AppData\Local\npm-cache\_npx\1e7f6d9597241db0\node_modules\.bin;F:\code\token_proxy\node_modules\.bin;F:\code\node_modules\.bin;F:\node_modules\.bin;E:\software\node\node_modules\npm\node_modules\@npmcli\run-script\lib\node-gyp-bin;C:\Users\Administrator\scoop\shims;C:\Users\Administrator\scoop\persist\uv\tools\shims;C:\Program Files\PowerShell\7;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\bin\x64;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\bin;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\libnvvp;C:\Python314\Scripts\;C:\Python314\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\dotnet\;C:\Program Files\NVIDIA Corporation\NVIDIA App\NvDLISR;C:\Program Files (x86)\NVIDIA Corporation\PhysX\Common;C:\Users\Administrator\AppData\Local\Programs\oh-my-posh\bin;C:\Users\Administrator\.cargo\bin;C:\Users\Administrator\.local\bin;C:\Program Files (x86)\Windows Kits\10\Windows Performance Toolkit\;E:\software\node\;C:\ProgramData\chocolatey\bin;C:\cygwin64\bin;C:\msys64\mingw64\bin;C:\Users\Administrator\scoop\apps\git\2.51.0.2\mingw64\bin;C:\cygwin64\lib\pkgconfig;C:\cygwin64\bin;E:\software\llama-b7211-bin-win-cuda-12.4-x64;C:\Users\Administrator\Desktop\dingo;E:\software\platform-tools;C:\Program Files\cursor\resources\app\bin;C:\Program Files\Go\bin;C:\Program Files\Rancher Desktop\resources\resources\win32\bin\;C:\Program Files\Rancher Desktop\resources\resources\win32\docker-cli-plugins\;C:\Program Files\Rancher Desktop\resources\resources\linux\bin\;C:\Program Files\Rancher Desktop\resources\resources\linux\docker-cli-plugins\;E:\software\WezTerm;E:\software\QoderCN\bin;C:\Program Files\NVIDIA Corporation\Nsight Compute 2026.2.1\;C:\Program Files\NVIDIA GPU Computing Toolkit\cudnn-windows-x86_64-9.25.0.15_cuda12-archive\bin\x64;E:\software\llama-b10355-bin-win-cuda-13.3-x64;E:\software\Strawberry\c\bin;E:\software\Strawberry\perl\site\bin;E:\software\Strawberry\perl\bin;C:\Program Files\PowerShell\7\;C:\Users\Administrator\scoop\persist\uv\python\shims;C:\Users\Administrator\.rustup\toolchains\esp\xtensa-esp32-elf-clang\esp-clang\bin;C:\Users\Administrator\.rustup\toolchains\esp\xtensa-esp-elf\bin;C:\Users\Administrator\AppData\Local\pnpm;e:\software\Trae CN\bin;C:\Users\Administrator\scoop\apps\openjdk21\current\bin;C:\Users\Administrator\scoop\apps\maven\current\bin;C:\Users\Administrator\AppData\Local\Programs\oh-my-posh\bin\;C:\Users\Administrator\.local\bin;E:\software\miniconda3;E:\software\miniconda3\Library\mingw-w64\bin;E:\software\miniconda3\Library\usr\bin;E:\software\miniconda3\Library\bin;E:\software\miniconda3\Scripts;C:\Users\Administrator\scoop\apps\mingw\current\bin;C:\Users\Administrator\.cargo\bin;C:\Users\Administrator\AppData\Local\Microsoft\WindowsApps;E:\software\PyCharm 2025.2.3\bin;C:\Users\Administrator\AppData\Local\Programs\Ollama;C:\Users\Administrator\go\bin;E:\software\DataGrip 2025.2.4\bin;E:\software\Windsurf\bin;C:\Users\Administrator\AppData\Local\Microsoft\WindowsApps;E:\software\RustRover 2025.2.3\bin;E:\software\Zed\bin;C:\Users\Administrator\AppData\Roaming\npm;E:\software\Microsoft VS Code\bin;E:\software\JetBrains Gateway 2025.2.5\bin;E:\software\dingo;E:\software\GoLand 2025.3\bin;E:\software\PyCharm 2025.3.1.1\bin;C:\WINDOWS\System32\Wbem;C:\Users\Administrator\go\bin;C:\Users\Administrator\.cherrystudio\bin;E:\software\CodeBuddy CN\bin;E:\software\DataGrip 2026.1.3\bin;C:\Users\Administrator\AppData\Local\PowerToys\DSCModules\;C:\Users\Administrator\.lmstudio\bin;C:\Users\Administrator\.qoder\bin\qodercli;C:\Users\Administrator\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=CC_x86_64-pc-windows-msvc
+CC_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_x86_64_pc_windows_msvc
+CC_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64_pc_windows_msvc
+CFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64-pc-windows-msvc
+CFLAGS_x86_64-pc-windows-msvc = None
+constant_time_test.c
+cargo:rustc-link-lib=static=ring_core_0_17_14__test
+cargo:rustc-link-search=native=F:\code\token_proxy\src-tauri\proxy-core\target\debug\build\ring-e2acac24c755c655\out
+cargo:rerun-if-changed=crypto\chacha\asm\chacha-armv4.pl
+cargo:rerun-if-changed=crypto\chacha\asm\chacha-armv8.pl
+cargo:rerun-if-changed=crypto\chacha\asm\chacha-x86.pl
+cargo:rerun-if-changed=crypto\chacha\asm\chacha-x86_64.pl
+cargo:rerun-if-changed=crypto\cipher\asm\chacha20_poly1305_armv8.pl
+cargo:rerun-if-changed=crypto\cipher\asm\chacha20_poly1305_x86_64.pl
+cargo:rerun-if-changed=crypto\constant_time_test.c
+cargo:rerun-if-changed=crypto\cpu_intel.c
+cargo:rerun-if-changed=crypto\crypto.c
+cargo:rerun-if-changed=crypto\curve25519\asm\x25519-asm-arm.S
+cargo:rerun-if-changed=crypto\curve25519\curve25519.c
+cargo:rerun-if-changed=crypto\curve25519\curve25519_64_adx.c
+cargo:rerun-if-changed=crypto\curve25519\curve25519_tables.h
+cargo:rerun-if-changed=crypto\curve25519\internal.h
+cargo:rerun-if-changed=crypto\fipsmodule\aes\aes_nohw.c
+cargo:rerun-if-changed=crypto\fipsmodule\aes\asm\aes-gcm-avx2-x86_64.pl
+cargo:rerun-if-changed=crypto\fipsmodule\aes\asm\aesni-gcm-x86_64.pl
+cargo:rerun-if-changed=crypto\fipsmodule\aes\asm\aesni-x86.pl
+cargo:rerun-if-changed=crypto\fipsmodule\aes\asm\aesni-x86_64.pl
+cargo:rerun-if-changed=crypto\fipsmodule\aes\asm\aesv8-armx.pl
+cargo:rerun-if-changed=crypto\fipsmodule\aes\asm\aesv8-gcm-armv8.pl
+cargo:rerun-if-changed=crypto\fipsmodule\aes\asm\bsaes-armv7.pl
+cargo:rerun-if-changed=crypto\fipsmodule\aes\asm\ghash-armv4.pl
+cargo:rerun-if-changed=crypto\fipsmodule\aes\asm\ghash-neon-armv8.pl
+cargo:rerun-if-changed=crypto\fipsmodule\aes\asm\ghash-x86.pl
+cargo:rerun-if-changed=crypto\fipsmodule\aes\asm\ghash-x86_64.pl
+cargo:rerun-if-changed=crypto\fipsmodule\aes\asm\ghashv8-armx.pl
+cargo:rerun-if-changed=crypto\fipsmodule\aes\asm\vpaes-armv7.pl
+cargo:rerun-if-changed=crypto\fipsmodule\aes\asm\vpaes-armv8.pl
+cargo:rerun-if-changed=crypto\fipsmodule\aes\asm\vpaes-x86.pl
+cargo:rerun-if-changed=crypto\fipsmodule\aes\asm\vpaes-x86_64.pl
+cargo:rerun-if-changed=crypto\fipsmodule\bn\asm\armv4-mont.pl
+cargo:rerun-if-changed=crypto\fipsmodule\bn\asm\armv8-mont.pl
+cargo:rerun-if-changed=crypto\fipsmodule\bn\asm\x86-mont.pl
+cargo:rerun-if-changed=crypto\fipsmodule\bn\asm\x86_64-mont.pl
+cargo:rerun-if-changed=crypto\fipsmodule\bn\asm\x86_64-mont5.pl
+cargo:rerun-if-changed=crypto\fipsmodule\bn\internal.h
+cargo:rerun-if-changed=crypto\fipsmodule\bn\montgomery.c
+cargo:rerun-if-changed=crypto\fipsmodule\bn\montgomery_inv.c
+cargo:rerun-if-changed=crypto\fipsmodule\ec\asm\p256-armv8-asm.pl
+cargo:rerun-if-changed=crypto\fipsmodule\ec\asm\p256-x86_64-asm.pl
+cargo:rerun-if-changed=crypto\fipsmodule\ec\ecp_nistz.c
+cargo:rerun-if-changed=crypto\fipsmodule\ec\ecp_nistz.h
+cargo:rerun-if-changed=crypto\fipsmodule\ec\ecp_nistz384.h
+cargo:rerun-if-changed=crypto\fipsmodule\ec\ecp_nistz384.inl
+cargo:rerun-if-changed=crypto\fipsmodule\ec\gfp_p256.c
+cargo:rerun-if-changed=crypto\fipsmodule\ec\gfp_p384.c
+cargo:rerun-if-changed=crypto\fipsmodule\ec\p256-nistz-table.h
+cargo:rerun-if-changed=crypto\fipsmodule\ec\p256-nistz.c
+cargo:rerun-if-changed=crypto\fipsmodule\ec\p256-nistz.h
+cargo:rerun-if-changed=crypto\fipsmodule\ec\p256.c
+cargo:rerun-if-changed=crypto\fipsmodule\ec\p256_shared.h
+cargo:rerun-if-changed=crypto\fipsmodule\ec\p256_table.h
+cargo:rerun-if-changed=crypto\fipsmodule\ec\util.h
+cargo:rerun-if-changed=crypto\fipsmodule\sha\asm\sha256-armv4.pl
+cargo:rerun-if-changed=crypto\fipsmodule\sha\asm\sha512-armv4.pl
+cargo:rerun-if-changed=crypto\fipsmodule\sha\asm\sha512-armv8.pl
+cargo:rerun-if-changed=crypto\fipsmodule\sha\asm\sha512-x86_64.pl
+cargo:rerun-if-changed=crypto\internal.h
+cargo:rerun-if-changed=crypto\limbs\limbs.c
+cargo:rerun-if-changed=crypto\limbs\limbs.h
+cargo:rerun-if-changed=crypto\limbs\limbs.inl
+cargo:rerun-if-changed=crypto\mem.c
+cargo:rerun-if-changed=crypto\perlasm\arm-xlate.pl
+cargo:rerun-if-changed=crypto\perlasm\x86asm.pl
+cargo:rerun-if-changed=crypto\perlasm\x86gas.pl
+cargo:rerun-if-changed=crypto\perlasm\x86nasm.pl
+cargo:rerun-if-changed=crypto\perlasm\x86_64-xlate.pl
+cargo:rerun-if-changed=crypto\poly1305\poly1305.c
+cargo:rerun-if-changed=crypto\poly1305\poly1305_arm.c
+cargo:rerun-if-changed=crypto\poly1305\poly1305_arm_asm.S
+cargo:rerun-if-changed=include\ring-core\aes.h
+cargo:rerun-if-changed=include\ring-core\asm_base.h
+cargo:rerun-if-changed=include\ring-core\base.h
+cargo:rerun-if-changed=include\ring-core\check.h
+cargo:rerun-if-changed=include\ring-core\mem.h
+cargo:rerun-if-changed=include\ring-core\target.h
+cargo:rerun-if-changed=include\ring-core\type_check.h
+cargo:rerun-if-changed=third_party/fiat\asm\fiat_curve25519_adx_mul.S
+cargo:rerun-if-changed=third_party/fiat\asm\fiat_curve25519_adx_square.S
+cargo:rerun-if-changed=third_party/fiat\curve25519_32.h
+cargo:rerun-if-changed=third_party/fiat\curve25519_64.h
+cargo:rerun-if-changed=third_party/fiat\curve25519_64_adx.h
+cargo:rerun-if-changed=third_party/fiat\curve25519_64_msvc.h
+cargo:rerun-if-changed=third_party/fiat\LICENSE
+cargo:rerun-if-changed=third_party/fiat\p256_32.h
+cargo:rerun-if-changed=third_party/fiat\p256_64.h
+cargo:rerun-if-changed=third_party/fiat\p256_64_msvc.h

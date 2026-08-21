@@ -1,0 +1,11 @@
+F:\code\token_proxy\src-tauri\proxy-core\target\debug\deps\socket2-641cf90d0bd92a68.d: F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\socket2-0.6.5\src\lib.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\socket2-0.6.5\src\sockaddr.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\socket2-0.6.5\src\socket.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\socket2-0.6.5\src\sockref.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\socket2-0.6.5\src\sys\windows.rs
+
+F:\code\token_proxy\src-tauri\proxy-core\target\debug\deps\libsocket2-641cf90d0bd92a68.rlib: F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\socket2-0.6.5\src\lib.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\socket2-0.6.5\src\sockaddr.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\socket2-0.6.5\src\socket.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\socket2-0.6.5\src\sockref.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\socket2-0.6.5\src\sys\windows.rs
+
+F:\code\token_proxy\src-tauri\proxy-core\target\debug\deps\libsocket2-641cf90d0bd92a68.rmeta: F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\socket2-0.6.5\src\lib.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\socket2-0.6.5\src\sockaddr.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\socket2-0.6.5\src\socket.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\socket2-0.6.5\src\sockref.rs F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\socket2-0.6.5\src\sys\windows.rs
+
+F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\socket2-0.6.5\src\lib.rs:
+F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\socket2-0.6.5\src\sockaddr.rs:
+F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\socket2-0.6.5\src\socket.rs:
+F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\socket2-0.6.5\src\sockref.rs:
+F:\code\token_proxy\.cargo-home\registry\src\127.0.0.1-bdfdd7eae38d3c71\socket2-0.6.5\src\sys\windows.rs:
