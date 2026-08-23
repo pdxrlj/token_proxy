@@ -126,7 +126,7 @@ export function Overview({ data }: { data: AppData }) {
 
       {/* 统计 */}
       <div className="grid-4">
-        <div className="stat" style={{ "--stat-accent": "var(--cyan)" } as CSSProperties}>
+        <div className="stat" style={{ "--stat-accent": "var(--accent)" } as CSSProperties}>
           <div className="label">
             <Inbox size={13} /> 请求总数
           </div>
@@ -154,7 +154,7 @@ export function Overview({ data }: { data: AppData }) {
           <div className="value">{fmtDuration(metrics.avg_latency_ms)}</div>
           <div className="trend">首字节到完成</div>
         </div>
-        <div className="stat" style={{ "--stat-accent": "var(--cyan-strong)" } as CSSProperties}>
+        <div className="stat" style={{ "--stat-accent": "var(--accent-strong)" } as CSSProperties}>
           <div className="label">
             <ArrowUpFromLine size={13} /> Token 用量
           </div>

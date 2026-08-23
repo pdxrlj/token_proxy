@@ -1,6 +1,7 @@
 pub mod api;
 pub mod circuit;
 pub mod config;
+pub mod db;
 pub mod retry;
 pub mod state;
 pub mod store;

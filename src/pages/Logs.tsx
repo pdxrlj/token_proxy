@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import type { AppData } from "../hooks/useAppData";
 import type { RequestLog } from "../lib/types";
-import { fmtBytes, fmtDuration, fmtTime } from "../components/ui";
+import { fmtBytes, fmtCount, fmtDuration, fmtTime } from "../components/ui";
 import { LogDetailModal } from "../components/LogDetail";
 import { Inbox, RefreshCw, ScrollText } from "lucide-react";
 
@@ -126,7 +126,9 @@ export function Logs({ data }: { data: AppData }) {
                     <td>
                       {r.cache_hit ? (
                         <span className="chip" style={{ fontSize: 11, padding: "2px 8px", color: "var(--green)", background: "var(--green-soft, rgba(16,185,129,.12))" }}>
-                          命中
+                          {r.cached_tokens != null && r.cached_tokens > 0
+                            ? `命中 ${fmtCount(r.cached_tokens)} tok`
+                            : "命中"}
                         </span>
                       ) : (
                         <span className="mono" style={{ color: "var(--text-3)" }}>—</span>

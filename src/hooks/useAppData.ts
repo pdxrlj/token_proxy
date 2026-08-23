@@ -73,11 +73,13 @@ export function useAppData(): AppData {
         const total = m.total + 1;
         const success = m.success + (log.status >= 200 && log.status < 400 ? 1 : 0);
         const failed = m.failed + (log.status >= 400 || log.error ? 1 : 0);
+        const cacheHits = (m.cache_hits ?? 0) + (log.cache_hit ? 1 : 0);
         return {
           ...m,
           total,
           success,
           failed,
+          cache_hits: cacheHits,
           avg_latency_ms:
             (m.avg_latency_ms * m.total + log.latency_ms) / total,
           recent: [log, ...m.recent].slice(0, 100),

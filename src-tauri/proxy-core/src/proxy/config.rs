@@ -128,6 +128,9 @@ impl ProviderConfig {
 pub struct RouteConfig {
     pub model: String,
     pub provider: String,
+    /// 转发到上游时使用的模型名（可选）；为空则不改写，沿用客户端请求的 model
+    #[serde(default)]
+    pub upstream_model: String,
     /// 参数改写（可选）：temperature / max_tokens 等，合并进请求体
     #[serde(default)]
     pub overrides: serde_json::Map<String, serde_json::Value>,
@@ -138,6 +141,7 @@ impl Default for RouteConfig {
         Self {
             model: String::new(),
             provider: String::new(),
+            upstream_model: String::new(),
             overrides: serde_json::Map::new(),
         }
     }
@@ -185,6 +189,7 @@ mod tests {
             routes: vec![RouteConfig {
                 model: "m1".into(),
                 provider: "b".into(),
+                upstream_model: String::new(),
                 overrides: serde_json::Map::new(),
             }],
             ..AppConfig::default()
@@ -211,7 +216,10 @@ mod tests {
             p.endpoint("chat/completions"),
             "https://api.example.com/v1/chat/completions"
         );
-        assert_eq!(p.endpoint("/chat/completions"), p.endpoint("chat/completions"));
+        assert_eq!(
+            p.endpoint("/chat/completions"),
+            p.endpoint("chat/completions")
+        );
 
         // 误填完整端点时不再重复拼接
         let p2 = ProviderConfig {

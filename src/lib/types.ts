@@ -34,6 +34,8 @@ export interface ProviderConfig {
 export interface RouteConfig {
   model: string;
   provider: string;
+  /** 转发到上游时使用的模型名；为空则不改写，沿用客户端请求的 model */
+  upstream_model?: string;
   overrides: Record<string, unknown>;
 }
 
@@ -61,6 +63,10 @@ export interface RequestLog {
   response_bytes?: number | null;
   ttfb_ms?: number | null;
   cache_hit?: boolean;
+  /** 缓存命中的 token 数量（上游返回的 cached_tokens / cache_read_input_tokens 等） */
+  cached_tokens?: number | null;
+  /** 实际转发给上游的模型名（经路由 upstream_model 改写后） */
+  upstream_model?: string | null;
 }
 
 export interface MetricsSnapshot {
@@ -114,3 +120,19 @@ export const DEFAULT_CONFIG: AppConfig = {
   providers: [],
   routes: [],
 };
+
+/** 微调数据集记录（对应 Rust DatasetRecord） */
+export interface DatasetRecord {
+  id: number;
+  ts: number;
+  model: string;
+  upstream_model: string | null;
+  provider: string | null;
+  stream: boolean;
+  tokens_in: number | null;
+  tokens_out: number | null;
+  cache_hit: boolean;
+  request_body: string;
+  response_body: string;
+  finetune_jsonl: string;
+}

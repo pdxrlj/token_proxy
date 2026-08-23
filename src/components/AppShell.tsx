@@ -4,6 +4,7 @@ import { StatusDot, fmtCount } from "./ui";
 import {
   Activity,
   Cable,
+  Database,
   LayoutDashboard,
   Settings,
   ScrollText,
@@ -11,13 +12,14 @@ import {
   Waypoints,
 } from "lucide-react";
 
-export type PageKey = "overview" | "providers" | "routes" | "logs" | "settings";
+export type PageKey = "overview" | "providers" | "routes" | "logs" | "dataset" | "settings";
 
 const NAV: { key: PageKey; label: string; icon: ReactNode }[] = [
   { key: "overview", label: "总览", icon: <LayoutDashboard size={16} /> },
   { key: "providers", label: "上游 Provider", icon: <ServerCog size={16} /> },
   { key: "routes", label: "路由", icon: <Waypoints size={16} /> },
   { key: "logs", label: "请求日志", icon: <ScrollText size={16} /> },
+  { key: "dataset", label: "微调数据集", icon: <Database size={16} /> },
   { key: "settings", label: "重试与设置", icon: <Settings size={16} /> },
 ];
 
@@ -26,6 +28,7 @@ const PAGE_TITLES: Record<PageKey, { title: string; sub: string }> = {
   providers: { title: "上游 Provider", sub: "管理模型服务商与密钥" },
   routes: { title: "路由", sub: "模型到上游的转发规则" },
   logs: { title: "请求日志", sub: "每次转发的完整记录" },
+  dataset: { title: "微调数据集", sub: "成功请求的 prompt + completion 存档" },
   settings: { title: "重试与设置", sub: "失败重试策略与服务配置" },
 };
 

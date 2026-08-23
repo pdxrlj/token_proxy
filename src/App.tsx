@@ -6,6 +6,7 @@ import { Overview } from "./pages/Overview";
 import { Providers } from "./pages/Providers";
 import { Routes } from "./pages/Routes";
 import { Logs } from "./pages/Logs";
+import { Dataset } from "./pages/Dataset";
 import { Settings } from "./pages/Settings";
 
 function AppInner() {
@@ -18,6 +19,7 @@ function AppInner() {
       {page === "providers" && <Providers data={data} />}
       {page === "routes" && <Routes data={data} />}
       {page === "logs" && <Logs data={data} />}
+      {page === "dataset" && <Dataset />}
       {page === "settings" && <Settings data={data} />}
     </AppShell>
   );

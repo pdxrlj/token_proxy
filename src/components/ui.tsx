@@ -152,7 +152,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
         {items.map((t) => (
           <div key={t.id} className={`toast ${t.kind}`}>
             {t.kind === "ok" ? (
-              <CheckCircle2 size={16} color="var(--cyan)" />
+              <CheckCircle2 size={16} color="var(--accent)" />
             ) : (
               <XCircle size={16} color="var(--rose)" />
             )}

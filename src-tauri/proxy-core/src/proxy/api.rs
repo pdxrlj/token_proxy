@@ -1,8 +1,12 @@
 use crate::proxy::circuit::CircuitBreaker;
 use crate::proxy::config::AppConfig;
+use crate::proxy::db::{build_finetune_jsonl, spawn_insert, InsertRecord};
 use crate::proxy::retry::{backoff_delay, ProxyError};
 use crate::proxy::state::{AppState, RequestLog};
-use crate::proxy::upstream::{call_upstream, forward_raw, forward_sse, UpstreamOutcome};
+use crate::proxy::upstream::{
+    call_upstream, detect_cache_hit, extract_cached_tokens, forward_raw, forward_sse,
+    UpstreamOutcome,
+};
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -127,13 +131,22 @@ async fn chat_completions(
             let resp_bytes = serde_json::to_vec(&v).map(|b| b.len() as u64).unwrap_or(0);
             log.response_bytes = Some(resp_bytes);
             state.metrics.add_bytes(0, resp_bytes);
-            log.tokens_out = v
-                .get("usage")
+            let usage = v.get("usage");
+            log.tokens_out = usage
                 .and_then(|u| u.get("completion_tokens"))
                 .and_then(|t| t.as_u64());
+            // 缓存命中检测：基于 usage 中的 cached_tokens 等字段
+            let cache_hit = usage.map(|u| detect_cache_hit(u)).unwrap_or(false);
+            log.cache_hit = cache_hit;
+            let cached_tokens = usage.map(|u| extract_cached_tokens(u)).filter(|v| *v > 0);
+            log.cached_tokens = cached_tokens;
+            if cache_hit {
+                state.metrics.inc_cache_hit();
+            }
             state
                 .metrics
                 .add_tokens(log.tokens_in.unwrap_or(0), log.tokens_out.unwrap_or(0));
+            save_to_db(&state, &log, &body, &v, false);
             finalize_log(&state, log);
             (StatusCode::OK, Json(v)).into_response()
         }
@@ -150,8 +163,28 @@ async fn chat_completions(
             log.status = 200;
             log.latency_ms = started.elapsed().as_millis() as u64;
             log.ttfb_ms = Some(log.latency_ms);
+            // 流式存库：把请求体 clone 传入 forward_sse，流结束后异步写入
+            let req_body = body.clone();
+            let log_ts = log.ts;
+            let log_model = log.model.clone();
+            let log_upstream_model = log.upstream_model.clone();
+            let log_provider = log.provider.clone();
+            let log_tokens_in = log.tokens_in;
             finalize_log(&state, log);
-            forward_sse(state.clone(), provider_name, model, resp, log_id).into_response()
+            forward_sse(
+                state.clone(),
+                provider_name,
+                model,
+                resp,
+                log_id,
+                req_body,
+                log_ts,
+                log_model,
+                log_upstream_model,
+                log_provider,
+                log_tokens_in,
+            )
+            .into_response()
         }
         Err(e) => {
             state.metrics.inc_total();
@@ -211,6 +244,18 @@ async fn fallback_proxy(
             let resp_bytes = serde_json::to_vec(&v).map(|b| b.len() as u64).unwrap_or(0);
             log.response_bytes = Some(resp_bytes);
             state.metrics.add_bytes(0, resp_bytes);
+            // 缓存命中检测
+            let cache_hit = v.get("usage").map(|u| detect_cache_hit(u)).unwrap_or(false);
+            log.cache_hit = cache_hit;
+            let cached_tokens = v
+                .get("usage")
+                .map(|u| extract_cached_tokens(u))
+                .filter(|val| *val > 0);
+            log.cached_tokens = cached_tokens;
+            if cache_hit {
+                state.metrics.inc_cache_hit();
+            }
+            save_to_db(&state, &log, &body, &v, false);
             finalize_log(&state, log);
             (StatusCode::OK, Json(v)).into_response()
         }
@@ -226,6 +271,12 @@ async fn fallback_proxy(
             let provider_name = log.provider.clone().unwrap_or_default();
             let model = log.model.clone();
             let log_id = log.id.clone();
+            let log_ts = log.ts;
+            let log_model = log.model.clone();
+            let log_upstream_model = log.upstream_model.clone();
+            let log_provider = log.provider.clone();
+            let log_tokens_in = log.tokens_in;
+            let req_body = body.clone();
             finalize_log(&state, log);
             let ct = resp
                 .headers()
@@ -235,8 +286,20 @@ async fn fallback_proxy(
                 .to_string();
             // SSE 流式：走 forward_sse 以统计字节数和 usage
             if ct.contains("text/event-stream") {
-                return forward_sse(state.clone(), provider_name, model, resp, log_id)
-                    .into_response();
+                return forward_sse(
+                    state.clone(),
+                    provider_name,
+                    model,
+                    resp,
+                    log_id,
+                    req_body,
+                    log_ts,
+                    log_model,
+                    log_upstream_model,
+                    log_provider,
+                    log_tokens_in,
+                )
+                .into_response();
             }
             (
                 StatusCode::OK,
@@ -289,6 +352,13 @@ async fn route_and_call(
     let (provider, body) = provider;
     log.provider = Some(provider.name.clone());
 
+    // 记录实际转发给上游的模型名（经 upstream_model 改写后）
+    if let Some(m) = body.get("model").and_then(|m| m.as_str()) {
+        if m != model {
+            log.upstream_model = Some(m.to_string());
+        }
+    }
+
     let breaker = state
         .breakers
         .entry(provider.id.clone())
@@ -334,7 +404,7 @@ async fn route_and_call(
     }
 }
 
-/// 路由参数改写：route.overrides 覆盖请求体字段
+/// 路由参数改写：upstream_model 覆盖 model 字段，route.overrides 覆盖其余字段
 fn apply_overrides(
     body: &serde_json::Value,
     route: Option<&crate::proxy::config::RouteConfig>,
@@ -342,6 +412,14 @@ fn apply_overrides(
     let mut b = body.clone();
     if let Some(r) = route {
         if let Some(obj) = b.as_object_mut() {
+            // 先应用 upstream_model（非空时改写请求体的 model）
+            if !r.upstream_model.is_empty() {
+                obj.insert(
+                    "model".into(),
+                    serde_json::Value::String(r.upstream_model.clone()),
+                );
+            }
+            // 再合并 overrides（可进一步覆盖任意字段，包括 model）
             for (k, v) in &r.overrides {
                 obj.insert(k.clone(), v.clone());
             }
@@ -358,4 +436,38 @@ fn estimate_input_tokens(body: &serde_json::Value) -> Option<u64> {
 fn finalize_log(state: &Arc<AppState>, log: RequestLog) {
     state.metrics.record(log.clone());
     state.emit_log(&log);
+}
+
+/// 把成功请求的 prompt + completion 存入 SQLite（用于后续微调）
+fn save_to_db(
+    state: &Arc<AppState>,
+    log: &RequestLog,
+    request_body: &serde_json::Value,
+    response_body: &serde_json::Value,
+    stream: bool,
+) {
+    let db = match state.db.lock().clone() {
+        Some(db) => db,
+        None => return,
+    };
+    let req_str = serde_json::to_string(request_body).unwrap_or_default();
+    let resp_str = serde_json::to_string(response_body).unwrap_or_default();
+    let finetune = build_finetune_jsonl(request_body, response_body, stream);
+    spawn_insert(
+        db,
+        InsertRecord {
+            ts: log.ts,
+            model: log.model.clone(),
+            upstream_model: log.upstream_model.clone(),
+            provider: log.provider.clone(),
+            stream,
+            tokens_in: log.tokens_in,
+            tokens_out: log.tokens_out,
+            cache_hit: log.cache_hit,
+            cached_tokens: log.cached_tokens,
+            request_body: req_str,
+            response_body: resp_str,
+            finetune_jsonl: finetune,
+        },
+    );
 }

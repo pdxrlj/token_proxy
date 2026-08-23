@@ -3,6 +3,7 @@
 import type {
   AppConfig,
   BreakerMap,
+  DatasetRecord,
   MetricsSnapshot,
   RequestLog,
   StatusDto,
@@ -20,6 +21,7 @@ export function mockLog(): RequestLog {
   const respBytes = stream
     ? 2000 + Math.floor(Math.random() * 18000)
     : 800 + Math.floor(Math.random() * 4000);
+  const cacheHit = Math.random() > 0.75;
   return {
     id: `mock-${++seq}`,
     ts: Date.now() - Math.floor(Math.random() * 120000),
@@ -40,7 +42,10 @@ export function mockLog(): RequestLog {
     ttfb_ms: stream
       ? 80 + Math.floor(Math.random() * 600)
       : 300 + Math.floor(Math.random() * 3500),
-    cache_hit: Math.random() > 0.75,
+    cache_hit: cacheHit,
+    cached_tokens: cacheHit
+      ? 100 + Math.floor(Math.random() * 2000)
+      : null,
   };
 }
 
@@ -96,16 +101,19 @@ export const MOCK_CONFIG: AppConfig = {
     {
       model: "gpt-4o",
       provider: "openai",
+      upstream_model: "",
       overrides: { temperature: 0.7 },
     },
     {
       model: "deepseek-chat",
       provider: "deepseek",
+      upstream_model: "",
       overrides: {},
     },
     {
       model: "claude-sonnet-4",
       provider: "anthropic",
+      upstream_model: "",
       overrides: {},
     },
   ],
@@ -148,4 +156,66 @@ export function mockBreakers(): BreakerMap {
     anthropic: { state: "closed", consecutive_failures: 0 },
     ollama: { state: "half_open", consecutive_failures: 3 },
   };
+}
+
+const MOCK_PROMPTS = [
+  "请解释 Rust 中所有权机制的核心概念",
+  "用 Python 实现一个快速排序算法",
+  "比较 React 和 Vue 的响应式系统差异",
+  "写一段 SQL 查询：找出订单金额最高的前 10 个用户",
+  "解释什么是 CAP 定理及其在分布式系统中的意义",
+];
+
+const MOCK_RESPONSES = [
+  "Rust 的所有权机制基于三条核心规则：每个值有且仅有一个所有者，当所有者离开作用域时值被自动释放，赋值或传参时所有权转移而非复制……",
+  "快速排序的核心思想是分治：选择一个基准元素，将数组分为小于和大于基准的两部分，递归排序后合并……",
+  "React 使用不可变状态 + 虚拟 DOM diff 触发重渲染，Vue 基于 Proxy 实现响应式依赖追踪，数据变更自动触发更新……",
+  "SELECT u.user_id, u.name, SUM(o.amount) AS total FROM orders o JOIN users u ON o.user_id = u.user_id GROUP BY u.user_id ORDER BY total DESC LIMIT 10;",
+  "CAP 定理指出分布式系统最多同时满足一致性（C）、可用性（A）、分区容错（P）中的两个。在网络分区不可避免时，需在 CP 和 AP 间取舍……",
+];
+
+export function mockDataset(limit: number, _offset: number): DatasetRecord[] {
+  const models = ["gpt-4o", "deepseek-chat", "claude-sonnet-4", "qwen-max"];
+  const providers = ["OpenAI", "DeepSeek", "Anthropic", "Qwen"];
+  return Array.from({ length: Math.min(limit, 5) }, (_, i) => {
+    const idx = i % MOCK_PROMPTS.length;
+    const mi = i % models.length;
+    const stream = i % 2 === 0;
+    const reqBody = JSON.stringify({
+      model: models[mi],
+      messages: [
+        { role: "system", content: "你是一个专业的 AI 助手。" },
+        { role: "user", content: MOCK_PROMPTS[idx] },
+      ],
+    });
+    const respBody = JSON.stringify({
+      choices: [{ message: { role: "assistant", content: MOCK_RESPONSES[idx] } }],
+      usage: { prompt_tokens: 120 + i * 10, completion_tokens: 80 + i * 5 },
+    });
+    const finetune = JSON.stringify({
+      messages: [
+        { role: "system", content: "你是一个专业的 AI 助手。" },
+        { role: "user", content: MOCK_PROMPTS[idx] },
+        { role: "assistant", content: MOCK_RESPONSES[idx] },
+      ],
+    });
+    return {
+      id: 1000 - i,
+      ts: Date.now() - i * 3600000,
+      model: models[mi],
+      upstream_model: i % 3 === 0 ? models[mi] + "-upstream" : null,
+      provider: providers[mi],
+      stream,
+      tokens_in: 120 + i * 10,
+      tokens_out: 80 + i * 5,
+      cache_hit: i % 4 === 0,
+      request_body: reqBody,
+      response_body: respBody,
+      finetune_jsonl: finetune,
+    };
+  });
+}
+
+export function mockDatasetCount(): number {
+  return 42;
 }

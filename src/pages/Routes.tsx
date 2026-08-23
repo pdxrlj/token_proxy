@@ -10,11 +10,14 @@ export function Routes({ data }: { data: AppData }) {
   const [newRoute, setNewRoute] = useState<RouteConfig>({
     model: "",
     provider: config.providers[0]?.id ?? "",
+    upstream_model: "",
     overrides: {},
   });
   const [adding, setAdding] = useState(false);
   const [overridesJson, setOverridesJson] = useState("{}");
   const [editingOverrides, setEditingOverrides] = useState<RouteConfig | null>(null);
+  // 行内编辑上游模型名的本地草稿（key=route.model），失焦时提交，避免每次按键写文件
+  const [draftUpstream, setDraftUpstream] = useState<Record<string, string>>({});
 
   const enabledProviders = config.providers.filter((p) => p.enabled);
 
@@ -34,7 +37,7 @@ export function Routes({ data }: { data: AppData }) {
     }
     await save({ ...config, routes: [...config.routes, newRoute] });
     setAdding(false);
-    setNewRoute({ model: "", provider: config.providers[0]?.id ?? "", overrides: {} });
+    setNewRoute({ model: "", provider: config.providers[0]?.id ?? "", upstream_model: "", overrides: {} });
     toast(`已添加路由 ${model} → ${newRoute.provider}`);
   };
 
@@ -42,6 +45,19 @@ export function Routes({ data }: { data: AppData }) {
     await save({
       ...config,
       routes: config.routes.map((r) => (r.model === model ? { ...r, provider } : r)),
+    });
+  };
+
+  const changeUpstreamModel = async (model: string, upstreamModel: string) => {
+    const trimmed = upstreamModel.trim();
+    // 值未变则不写
+    const current = config.routes.find((r) => r.model === model)?.upstream_model ?? "";
+    if (trimmed === current) return;
+    await save({
+      ...config,
+      routes: config.routes.map((r) =>
+        r.model === model ? { ...r, upstream_model: trimmed } : r,
+      ),
     });
   };
 
@@ -100,8 +116,9 @@ export function Routes({ data }: { data: AppData }) {
           <table className="table">
             <thead>
               <tr>
-                <th style={{ width: "30%" }}>模型名</th>
-                <th style={{ width: "30%" }}>上游 Provider</th>
+                <th style={{ width: "24%" }}>模型名</th>
+                <th style={{ width: "24%" }}>上游模型名</th>
+                <th style={{ width: "22%" }}>上游 Provider</th>
                 <th>参数改写</th>
                 <th style={{ width: 120 }}></th>
               </tr>
@@ -113,9 +130,28 @@ export function Routes({ data }: { data: AppData }) {
                     <span className="mono" style={{ fontWeight: 600, color: "var(--text-1)" }}>{r.model}</span>
                   </td>
                   <td>
+                    <input
+                      className="input mono"
+                      style={{ width: "100%" }}
+                      value={draftUpstream[r.model] ?? r.upstream_model ?? ""}
+                      placeholder={r.model}
+                      onChange={(e) =>
+                        setDraftUpstream((d) => ({ ...d, [r.model]: e.target.value }))
+                      }
+                      onBlur={(e) => {
+                        changeUpstreamModel(r.model, e.target.value);
+                        setDraftUpstream((d) => {
+                          const { [r.model]: _, ...rest } = d;
+                          return rest;
+                        });
+                      }}
+                      title="转发到上游时使用的模型名；留空则沿用客户端请求的 model"
+                    />
+                  </td>
+                  <td>
                     <select
                       className="select mono"
-                      style={{ width: "auto", minWidth: 180 }}
+                      style={{ width: "auto", minWidth: 160 }}
                       value={r.provider}
                       onChange={(e) => changeProvider(r.model, e.target.value)}
                     >
@@ -160,6 +196,14 @@ export function Routes({ data }: { data: AppData }) {
               placeholder="gpt-4o"
               onChange={(e) => setNewRoute({ ...newRoute, model: e.target.value })}
               autoFocus
+            />
+          </Field>
+          <Field label="上游模型名" help="转发到上游时使用的模型名；留空则沿用客户端请求的 model">
+            <input
+              className="input mono"
+              value={newRoute.upstream_model ?? ""}
+              placeholder="z-ai/glm-5.2:free"
+              onChange={(e) => setNewRoute({ ...newRoute, upstream_model: e.target.value })}
             />
           </Field>
           <Field label="转发到 Provider">

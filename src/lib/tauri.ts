@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import type {
   AppConfig,
   BreakerMap,
+  DatasetRecord,
   MetricsSnapshot,
   RequestLog,
   StatusDto,
@@ -11,6 +12,8 @@ import {
   MOCK_CONFIG,
   isTauri,
   mockBreakers,
+  mockDataset,
+  mockDatasetCount,
   mockLog,
   mockMetrics,
   mockStatus,
@@ -39,6 +42,24 @@ export const api = {
     isTauri
       ? invoke<BreakerMap>("get_breaker_status")
       : Promise.resolve(mockBreakers()),
+  getDataset: (limit = 50, offset = 0, modelFilter?: string) =>
+    isTauri
+      ? invoke<DatasetRecord[]>("get_dataset", { limit, offset, modelFilter })
+      : Promise.resolve(mockDataset(limit, offset)),
+  getDatasetCount: (modelFilter?: string) =>
+    isTauri
+      ? invoke<number>("get_dataset_count", { modelFilter })
+      : Promise.resolve(mockDatasetCount()),
+  exportDatasetJsonl: (modelFilter?: string) =>
+    isTauri
+      ? invoke<string>("export_dataset_jsonl", { modelFilter })
+      : Promise.resolve(""),
+  clearDataset: () =>
+    isTauri ? invoke<void>("clear_dataset") : Promise.resolve(),
+  deleteDatasetRecord: (id: number) =>
+    isTauri
+      ? invoke<void>("delete_dataset_record", { id })
+      : Promise.resolve(),
 };
 
 /** 订阅代理请求日志推送 */

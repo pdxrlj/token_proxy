@@ -8,9 +8,7 @@ use token_proxy_core::proxy::state::AppState;
 
 #[tokio::main]
 async fn main() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter("info")
-        .try_init();
+    let _ = tracing_subscriber::fmt().with_env_filter("info").try_init();
 
     let mut cfg = AppConfig::default();
     cfg.server.port = 8787;
@@ -26,6 +24,7 @@ async fn main() {
     cfg.routes = vec![RouteConfig {
         model: "gpt-4o".into(),
         provider: "mock".into(),
+        upstream_model: String::new(),
         overrides: serde_json::Map::new(),
     }];
 

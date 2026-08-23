@@ -1,5 +1,6 @@
 use crate::proxy::circuit::CircuitBreaker;
 use crate::proxy::config::AppConfig;
+use crate::proxy::db::Database;
 use chrono::Utc;
 use dashmap::DashMap;
 use parking_lot::{Mutex, RwLock};
@@ -34,6 +35,12 @@ pub struct RequestLog {
     /// 是否命中缓存
     #[serde(default)]
     pub cache_hit: bool,
+    /// 缓存命中的 token 数量（上游返回的 cached_tokens / cache_read_input_tokens 等）
+    #[serde(default)]
+    pub cached_tokens: Option<u64>,
+    /// 实际转发给上游的模型名（经路由 upstream_model 改写后）；与 model 不同时才有值
+    #[serde(default)]
+    pub upstream_model: Option<String>,
 }
 
 impl RequestLog {
@@ -55,6 +62,8 @@ impl RequestLog {
             response_bytes: None,
             ttfb_ms: None,
             cache_hit: false,
+            cached_tokens: None,
+            upstream_model: None,
         }
     }
 }
@@ -140,6 +149,21 @@ impl Metrics {
             }
         }
     }
+
+    /// 流式响应结束后回写缓存命中状态（命中时累加计数器）
+    pub fn update_log_cache_hit(&self, id: &str, cache_hit: bool, cached_tokens: Option<u64>) {
+        if cache_hit {
+            self.inc_cache_hit();
+        }
+        let mut q = self.logs.lock();
+        for log in q.iter_mut() {
+            if log.id == id {
+                log.cache_hit = cache_hit;
+                log.cached_tokens = cached_tokens;
+                break;
+            }
+        }
+    }
     pub fn snapshot(&self) -> MetricsSnapshot {
         let total = self.total.load(Ordering::Relaxed);
         let success = self.success.load(Ordering::Relaxed);
@@ -185,6 +209,8 @@ pub struct AppState {
     pub started_at: std::time::Instant,
     /// 事件推送器，桌面运行时注入；纯测试时为空
     pub sink: Mutex<Option<Arc<dyn EventSink>>>,
+    /// SQLite 数据集存储（可选；测试时可为 None）
+    pub db: Mutex<Option<Arc<Database>>>,
 }
 
 impl AppState {
@@ -201,6 +227,7 @@ impl AppState {
             http,
             started_at: std::time::Instant::now(),
             sink: Mutex::new(None),
+            db: Mutex::new(None),
         }
     }
 

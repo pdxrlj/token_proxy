@@ -1,5 +1,5 @@
 import type { RequestLog } from "../lib/types";
-import { Modal, fmtBytes, fmtDuration } from "./ui";
+import { Modal, fmtBytes, fmtCount, fmtDuration } from "./ui";
 import { Check, Copy, RefreshCw, X } from "lucide-react";
 import { useState } from "react";
 
@@ -73,6 +73,9 @@ export function LogDetailModal({
         {log.cache_hit && (
           <span className="chip" style={{ color: "var(--green)", background: "rgba(16,185,129,.12)" }}>
             缓存命中
+            {log.cached_tokens != null && log.cached_tokens > 0
+              ? ` · ${fmtCount(log.cached_tokens)} tok`
+              : ""}
           </span>
         )}
       </div>
@@ -84,6 +87,7 @@ export function LogDetailModal({
         <Row k="方法" v={log.method} mono />
         <Row k="端点" v={log.path} mono />
         <Row k="Provider" v={log.provider ?? "—"} />
+        <Row k="上游模型" v={log.upstream_model ?? "—"} mono />
         <Row k="延迟" v={fmtDuration(log.latency_ms)} mono />
         <Row k="首字节时间" v={log.ttfb_ms != null ? fmtDuration(log.ttfb_ms) : "—"} mono />
         <Row
@@ -96,7 +100,16 @@ export function LogDetailModal({
           mono
         />
         <Row k="输出大小" v={fmtBytes(log.response_bytes)} mono />
-        <Row k="缓存命中" v={log.cache_hit ? "是" : "否"} />
+        <Row
+          k="缓存命中"
+          v={
+            !log.cache_hit
+              ? "否"
+              : log.cached_tokens != null && log.cached_tokens > 0
+                ? `是 · ${fmtCount(log.cached_tokens)} tok`
+                : "是"
+          }
+        />
       </div>
 
       {/* 错误详情（完整信息 + 复制） */}

@@ -5,17 +5,16 @@ use crate::proxy::config::{AppConfig, ProviderConfig, RouteConfig};
 use crate::proxy::state::AppState;
 use axum::extract::Json;
 use axum::http::StatusCode;
-use axum::response::IntoResponse;
 use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::Router;
 use futures_util::stream;
-use futures_util::stream::StreamExt;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::convert::Infallible;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 use tokio::net::TcpListener;
 
@@ -116,7 +115,11 @@ async fn spawn_mock(port: u16, counter: Arc<AtomicU32>) {
     spawn_mock_full(port, counter, None, None).await;
 }
 
-async fn spawn_mock_with_recorder(port: u16, counter: Arc<AtomicU32>, recorder: Option<BodyRecorder>) {
+async fn spawn_mock_with_recorder(
+    port: u16,
+    counter: Arc<AtomicU32>,
+    recorder: Option<BodyRecorder>,
+) {
     spawn_mock_full(port, counter, recorder, None).await;
 }
 
@@ -160,6 +163,7 @@ async fn spawn_proxy_with_key(
     cfg.routes = vec![RouteConfig {
         model: "mock-model".into(),
         provider: "mock".into(),
+        upstream_model: String::new(),
         overrides: serde_json::Map::new(),
     }];
     if let Some(n) = retry_override {
@@ -253,7 +257,11 @@ async fn smoke_full_chain() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200, "should succeed after retries");
-    assert_eq!(mock_counter2.load(Ordering::SeqCst), 3, "3 attempts expected");
+    assert_eq!(
+        mock_counter2.load(Ordering::SeqCst),
+        3,
+        "3 attempts expected"
+    );
     let snap = state2.metrics.snapshot();
     assert_eq!(snap.retries, 2, "retry counter");
     assert_eq!(snap.total, 1);
@@ -263,9 +271,16 @@ async fn smoke_full_chain() {
     assert_eq!(received.len(), 3, "mock should receive 3 attempts");
     assert_eq!(received[0], received[1], "retry must resend identical body");
     assert_eq!(received[1], received[2], "retry must resend identical body");
-    assert_eq!(received[0]["messages"][0]["content"], "hi", "messages preserved");
+    assert_eq!(
+        received[0]["messages"][0]["content"], "hi",
+        "messages preserved"
+    );
     assert_eq!(received[0]["stream"], json!(false), "stream flag preserved");
-    assert_eq!(received[0]["x_mock_fail_n"], json!(2), "injected field preserved");
+    assert_eq!(
+        received[0]["x_mock_fail_n"],
+        json!(2),
+        "injected field preserved"
+    );
     assert!(received[0].get("model").is_some(), "model preserved");
     drop(received);
 
@@ -310,8 +325,14 @@ async fn smoke_full_chain() {
     {
         let b = state4.breakers.get("mock").expect("breaker exists");
         let st = b.status();
-        eprintln!("DEBUG breaker state={:?} failures={}", st.state, st.consecutive_failures);
-        eprintln!("DEBUG cfg enabled={}", state4.config.read().retry.circuit_breaker.enabled);
+        eprintln!(
+            "DEBUG breaker state={:?} failures={}",
+            st.state, st.consecutive_failures
+        );
+        eprintln!(
+            "DEBUG cfg enabled={}",
+            state4.config.read().retry.circuit_breaker.enabled
+        );
     }
     let resp = client
         .post("http://127.0.0.1:8794/v1/chat/completions")
@@ -320,7 +341,11 @@ async fn smoke_full_chain() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 503);
-    assert_eq!(mock_counter4.load(Ordering::SeqCst), 4, "no more upstream calls");
+    assert_eq!(
+        mock_counter4.load(Ordering::SeqCst),
+        4,
+        "no more upstream calls"
+    );
     let err: Value = resp.json().await.unwrap();
     assert_eq!(err["error"]["type"], "circuit_open");
     // 手动重置熔断后恢复
@@ -348,7 +373,11 @@ async fn smoke_full_chain() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "empty local token must ignore client Authorization");
+    assert_eq!(
+        resp.status(),
+        200,
+        "empty local token must ignore client Authorization"
+    );
     assert!(
         !auth_seen.load(Ordering::SeqCst),
         "client Authorization must NOT be forwarded to upstream"
@@ -381,5 +410,9 @@ async fn smoke_full_chain() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200, "correct token must pass");
-    assert_eq!(mock_counter6.load(Ordering::SeqCst), 1, "only the authed request reaches upstream");
+    assert_eq!(
+        mock_counter6.load(Ordering::SeqCst),
+        1,
+        "only the authed request reaches upstream"
+    );
 }
