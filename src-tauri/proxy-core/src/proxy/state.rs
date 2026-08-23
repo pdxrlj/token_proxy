@@ -6,8 +6,8 @@ use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 /// 一条已完成的请求记录（推给前端展示）
 #[derive(Debug, Clone, Serialize)]
@@ -25,6 +25,15 @@ pub struct RequestLog {
     pub error: Option<String>,
     pub tokens_in: Option<u64>,
     pub tokens_out: Option<u64>,
+    /// 响应体大小（字节）
+    #[serde(default)]
+    pub response_bytes: Option<u64>,
+    /// 首字节时间（毫秒）；流式为收到第一个 chunk 的时间，非流式为总延迟
+    #[serde(default)]
+    pub ttfb_ms: Option<u64>,
+    /// 是否命中缓存
+    #[serde(default)]
+    pub cache_hit: bool,
 }
 
 impl RequestLog {
@@ -43,6 +52,9 @@ impl RequestLog {
             error: None,
             tokens_in: None,
             tokens_out: None,
+            response_bytes: None,
+            ttfb_ms: None,
+            cache_hit: false,
         }
     }
 }
@@ -57,6 +69,9 @@ pub struct MetricsSnapshot {
     pub tokens_in: u64,
     pub tokens_out: u64,
     pub avg_latency_ms: u64,
+    pub cache_hits: u64,
+    pub bytes_in: u64,
+    pub bytes_out: u64,
     pub recent: Vec<RequestLog>,
 }
 
@@ -69,6 +84,9 @@ pub struct Metrics {
     tokens_in: AtomicU64,
     tokens_out: AtomicU64,
     latency_sum_ms: AtomicU64,
+    cache_hits: AtomicU64,
+    bytes_in: AtomicU64,
+    bytes_out: AtomicU64,
     logs: Mutex<VecDeque<RequestLog>>,
 }
 
@@ -94,6 +112,13 @@ impl Metrics {
     pub fn add_latency(&self, ms: u64) {
         self.latency_sum_ms.fetch_add(ms, Ordering::Relaxed);
     }
+    pub fn inc_cache_hit(&self) {
+        self.cache_hits.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn add_bytes(&self, input: u64, output: u64) {
+        self.bytes_in.fetch_add(input, Ordering::Relaxed);
+        self.bytes_out.fetch_add(output, Ordering::Relaxed);
+    }
     pub fn record(&self, log: RequestLog) {
         let mut q = self.logs.lock();
         if q.len() >= LOG_BUFFER {
@@ -109,6 +134,9 @@ impl Metrics {
         let tokens_in = self.tokens_in.load(Ordering::Relaxed);
         let tokens_out = self.tokens_out.load(Ordering::Relaxed);
         let latency_sum = self.latency_sum_ms.load(Ordering::Relaxed);
+        let cache_hits = self.cache_hits.load(Ordering::Relaxed);
+        let bytes_in = self.bytes_in.load(Ordering::Relaxed);
+        let bytes_out = self.bytes_out.load(Ordering::Relaxed);
         let q = self.logs.lock();
         MetricsSnapshot {
             total,
@@ -118,6 +146,9 @@ impl Metrics {
             tokens_in,
             tokens_out,
             avg_latency_ms: if total > 0 { latency_sum / total } else { 0 },
+            cache_hits,
+            bytes_in,
+            bytes_out,
             recent: q.iter().rev().take(100).cloned().collect(),
         }
     }

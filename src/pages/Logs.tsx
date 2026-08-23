@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import type { AppData } from "../hooks/useAppData";
 import type { RequestLog } from "../lib/types";
-import { fmtDuration, fmtTime } from "../components/ui";
+import { fmtBytes, fmtDuration, fmtTime } from "../components/ui";
 import { LogDetailModal } from "../components/LogDetail";
 import { Inbox, RefreshCw, ScrollText } from "lucide-react";
 
@@ -62,7 +62,7 @@ export function Logs({ data }: { data: AppData }) {
           </div>
         ) : (
           <div style={{ overflowX: "auto" }}>
-            <table className="table" style={{ minWidth: 920 }}>
+            <table className="table" style={{ minWidth: 1080 }}>
               <thead>
                 <tr>
                   <th>时间</th>
@@ -73,6 +73,8 @@ export function Logs({ data }: { data: AppData }) {
                   <th>Provider</th>
                   <th style={{ textAlign: "right" }}>延迟</th>
                   <th style={{ textAlign: "right" }}>Tokens (入/出)</th>
+                  <th style={{ textAlign: "right" }}>输出大小</th>
+                  <th>缓存</th>
                   <th>错误</th>
                 </tr>
               </thead>
@@ -117,6 +119,18 @@ export function Logs({ data }: { data: AppData }) {
                     </td>
                     <td className="mono" style={{ textAlign: "right", color: "var(--text-3)" }}>
                       {r.tokens_in ?? "—"} / {r.tokens_out ?? "—"}
+                    </td>
+                    <td className="mono" style={{ textAlign: "right", color: "var(--text-3)" }}>
+                      {fmtBytes(r.response_bytes)}
+                    </td>
+                    <td>
+                      {r.cache_hit ? (
+                        <span className="chip" style={{ fontSize: 11, padding: "2px 8px", color: "var(--green)", background: "var(--green-soft, rgba(16,185,129,.12))" }}>
+                          命中
+                        </span>
+                      ) : (
+                        <span className="mono" style={{ color: "var(--text-3)" }}>—</span>
+                      )}
                     </td>
                     <td className="mono" style={{ color: "var(--rose)", fontSize: 11.5, maxWidth: 200 }}>
                       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "block" }} title={r.error ?? ""}>

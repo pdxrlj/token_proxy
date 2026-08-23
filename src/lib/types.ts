@@ -58,6 +58,9 @@ export interface RequestLog {
   error: string | null;
   tokens_in: number | null;
   tokens_out: number | null;
+  response_bytes?: number | null;
+  ttfb_ms?: number | null;
+  cache_hit?: boolean;
 }
 
 export interface MetricsSnapshot {
@@ -68,6 +71,9 @@ export interface MetricsSnapshot {
   tokens_in: number;
   tokens_out: number;
   avg_latency_ms: number;
+  cache_hits?: number;
+  bytes_in?: number;
+  bytes_out?: number;
   recent: RequestLog[];
 }
 

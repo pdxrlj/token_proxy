@@ -4,6 +4,7 @@ import type { AppData } from "../hooks/useAppData";
 import {
   Button,
   StatusDot,
+  fmtBytes,
   fmtCount,
   fmtDuration,
   fmtTime,
@@ -14,6 +15,7 @@ import {
   ArrowDownToLine,
   ArrowUpFromLine,
   Copy,
+  Database,
   Gauge,
   Inbox,
   Radio,
@@ -45,6 +47,10 @@ export function Overview({ data }: { data: AppData }) {
   const endpoint = status ? `${status.host}:${status.port}` : "…";
   const successRate =
     metrics.total > 0 ? Math.round((metrics.success / metrics.total) * 100) : 100;
+  const cacheHitRate =
+    metrics.total > 0 && metrics.cache_hits != null
+      ? Math.round((metrics.cache_hits / metrics.total) * 100)
+      : 0;
 
   const copyEndpoint = async () => {
     try {
@@ -158,6 +164,29 @@ export function Overview({ data }: { data: AppData }) {
           <div className="trend">
             <ArrowDownToLine size={11} style={{ verticalAlign: -1 }} /> 入 {fmtCount(metrics.tokens_in)} · 出{" "}
             {fmtCount(metrics.tokens_out)}
+          </div>
+        </div>
+        <div className="stat" style={{ "--stat-accent": "var(--green)" } as CSSProperties}>
+          <div className="label">
+            <Database size={13} /> 缓存命中率
+          </div>
+          <div className="value">
+            {cacheHitRate}
+            <small>%</small>
+          </div>
+          <div className="trend">
+            命中 {fmtCount(metrics.cache_hits ?? 0)} / {fmtCount(metrics.total)} 次
+          </div>
+        </div>
+        <div className="stat" style={{ "--stat-accent": "var(--amber)" } as CSSProperties}>
+          <div className="label">
+            <ArrowDownToLine size={13} /> 流量
+          </div>
+          <div className="value" style={{ fontSize: 22 }}>
+            {fmtBytes((metrics.bytes_out ?? 0))}
+          </div>
+          <div className="trend">
+            入 {fmtBytes(metrics.bytes_in ?? 0)} · 出 {fmtBytes(metrics.bytes_out ?? 0)}
           </div>
         </div>
       </div>

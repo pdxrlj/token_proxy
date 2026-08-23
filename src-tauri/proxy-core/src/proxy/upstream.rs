@@ -165,6 +165,7 @@ pub fn forward_sse(
             output
         };
         metrics.add_tokens(input, out_approx);
+        metrics.add_bytes(0, bytes_total.load(Ordering::Relaxed));
     };
 
     Sse::new(inner).keep_alive(KeepAlive::default())

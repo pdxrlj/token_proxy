@@ -183,3 +183,15 @@ export function fmtCount(n: number): string {
   if (n >= 1000) return `${(n / 1000).toFixed(2)}k`;
   return String(n);
 }
+
+export function fmtBytes(bytes: number | null | undefined): string {
+  if (bytes == null || bytes <= 0) return "—";
+  const units = ["B", "KB", "MB", "GB"];
+  let val = bytes;
+  let i = 0;
+  while (val >= 1024 && i < units.length - 1) {
+    val /= 1024;
+    i++;
+  }
+  return `${val.toFixed(val >= 100 ? 0 : 1)} ${units[i]}`;
+}

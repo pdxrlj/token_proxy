@@ -1,10 +1,10 @@
 use crate::proxy::circuit::CircuitBreaker;
 use crate::proxy::config::AppConfig;
-use crate::proxy::retry::{ProxyError, backoff_delay};
+use crate::proxy::retry::{backoff_delay, ProxyError};
 use crate::proxy::state::{AppState, RequestLog};
-use crate::proxy::upstream::{UpstreamOutcome, call_upstream, forward_raw, forward_sse};
+use crate::proxy::upstream::{call_upstream, forward_raw, forward_sse, UpstreamOutcome};
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -45,9 +45,7 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     }))
 }
 
-async fn list_models(
-    State(state): State<Arc<AppState>>,
-) -> Json<serde_json::Value> {
+async fn list_models(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let cfg = state.config.read();
     let mut seen = std::collections::HashSet::new();
     let mut data = Vec::new();
@@ -100,7 +98,10 @@ async fn chat_completions(
         .and_then(|m| m.as_str())
         .unwrap_or("")
         .to_string();
-    log.stream = body.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
+    log.stream = body
+        .get("stream")
+        .and_then(|s| s.as_bool())
+        .unwrap_or(false);
     log.tokens_in = estimate_input_tokens(&body);
 
     // 本地鉴权
@@ -117,17 +118,22 @@ async fn chat_completions(
         Ok(UpstreamOutcome::Json(v)) => {
             state.metrics.inc_total();
             state.metrics.inc_success();
-            state.metrics.add_latency(started.elapsed().as_millis() as u64);
+            state
+                .metrics
+                .add_latency(started.elapsed().as_millis() as u64);
             log.status = 200;
             log.latency_ms = started.elapsed().as_millis() as u64;
+            log.ttfb_ms = Some(log.latency_ms);
+            let resp_bytes = serde_json::to_vec(&v).map(|b| b.len() as u64).unwrap_or(0);
+            log.response_bytes = Some(resp_bytes);
+            state.metrics.add_bytes(0, resp_bytes);
             log.tokens_out = v
                 .get("usage")
                 .and_then(|u| u.get("completion_tokens"))
                 .and_then(|t| t.as_u64());
-            state.metrics.add_tokens(
-                log.tokens_in.unwrap_or(0),
-                log.tokens_out.unwrap_or(0),
-            );
+            state
+                .metrics
+                .add_tokens(log.tokens_in.unwrap_or(0), log.tokens_out.unwrap_or(0));
             finalize_log(&state, log);
             (StatusCode::OK, Json(v)).into_response()
         }
@@ -137,18 +143,24 @@ async fn chat_completions(
             let model = log.model.clone();
             state.metrics.inc_total();
             state.metrics.inc_success();
-            state.metrics.add_latency(started.elapsed().as_millis() as u64);
+            state
+                .metrics
+                .add_latency(started.elapsed().as_millis() as u64);
             log.status = 200;
             log.latency_ms = started.elapsed().as_millis() as u64;
+            log.ttfb_ms = Some(log.latency_ms);
             finalize_log(&state, log);
             forward_sse(state.clone(), provider_name, model, resp).into_response()
         }
         Err(e) => {
             state.metrics.inc_total();
             state.metrics.inc_failed();
-            state.metrics.add_latency(started.elapsed().as_millis() as u64);
+            state
+                .metrics
+                .add_latency(started.elapsed().as_millis() as u64);
             log.status = e.http_status().as_u16();
             log.latency_ms = started.elapsed().as_millis() as u64;
+            log.ttfb_ms = Some(log.latency_ms);
             log.error = Some(e.to_string());
             finalize_log(&state, log);
             (e.http_status(), Json(e.openai_error())).into_response()
@@ -163,7 +175,6 @@ async fn fallback_proxy(
     Path(path): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> Response {
-
     let mut log = RequestLog::new();
     log.method = "POST".into();
     log.path = format!("/v1/{path}");
@@ -172,7 +183,10 @@ async fn fallback_proxy(
         .and_then(|m| m.as_str())
         .unwrap_or("")
         .to_string();
-    log.stream = body.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
+    log.stream = body
+        .get("stream")
+        .and_then(|s| s.as_bool())
+        .unwrap_or(false);
 
     // 本地鉴权
     {
@@ -187,18 +201,27 @@ async fn fallback_proxy(
         Ok(UpstreamOutcome::Json(v)) => {
             state.metrics.inc_total();
             state.metrics.inc_success();
-            state.metrics.add_latency(started.elapsed().as_millis() as u64);
+            state
+                .metrics
+                .add_latency(started.elapsed().as_millis() as u64);
             log.status = 200;
             log.latency_ms = started.elapsed().as_millis() as u64;
+            log.ttfb_ms = Some(log.latency_ms);
+            let resp_bytes = serde_json::to_vec(&v).map(|b| b.len() as u64).unwrap_or(0);
+            log.response_bytes = Some(resp_bytes);
+            state.metrics.add_bytes(0, resp_bytes);
             finalize_log(&state, log);
             (StatusCode::OK, Json(v)).into_response()
         }
         Ok(UpstreamOutcome::Stream(resp)) => {
             state.metrics.inc_total();
             state.metrics.inc_success();
-            state.metrics.add_latency(started.elapsed().as_millis() as u64);
+            state
+                .metrics
+                .add_latency(started.elapsed().as_millis() as u64);
             log.status = 200;
             log.latency_ms = started.elapsed().as_millis() as u64;
+            log.ttfb_ms = Some(log.latency_ms);
             finalize_log(&state, log);
             let ct = resp
                 .headers()
@@ -216,9 +239,12 @@ async fn fallback_proxy(
         Err(e) => {
             state.metrics.inc_total();
             state.metrics.inc_failed();
-            state.metrics.add_latency(started.elapsed().as_millis() as u64);
+            state
+                .metrics
+                .add_latency(started.elapsed().as_millis() as u64);
             log.status = e.http_status().as_u16();
             log.latency_ms = started.elapsed().as_millis() as u64;
+            log.ttfb_ms = Some(log.latency_ms);
             log.error = Some(e.to_string());
             finalize_log(&state, log);
             (e.http_status(), Json(e.openai_error())).into_response()

@@ -1,5 +1,5 @@
 import type { RequestLog } from "../lib/types";
-import { Modal, fmtDuration } from "./ui";
+import { Modal, fmtBytes, fmtDuration } from "./ui";
 import { Check, Copy, RefreshCw, X } from "lucide-react";
 import { useState } from "react";
 
@@ -70,6 +70,11 @@ export function LogDetailModal({
           重试 {log.retries} 次
         </span>
         {log.stream && <span className="chip">流式</span>}
+        {log.cache_hit && (
+          <span className="chip" style={{ color: "var(--green)", background: "rgba(16,185,129,.12)" }}>
+            缓存命中
+          </span>
+        )}
       </div>
 
       {/* 字段明细 */}
@@ -80,6 +85,7 @@ export function LogDetailModal({
         <Row k="端点" v={log.path} mono />
         <Row k="Provider" v={log.provider ?? "—"} />
         <Row k="延迟" v={fmtDuration(log.latency_ms)} mono />
+        <Row k="首字节时间" v={log.ttfb_ms != null ? fmtDuration(log.ttfb_ms) : "—"} mono />
         <Row
           k="Tokens（入/出）"
           v={
@@ -89,6 +95,8 @@ export function LogDetailModal({
           }
           mono
         />
+        <Row k="输出大小" v={fmtBytes(log.response_bytes)} mono />
+        <Row k="缓存命中" v={log.cache_hit ? "是" : "否"} />
       </div>
 
       {/* 错误详情（完整信息 + 复制） */}

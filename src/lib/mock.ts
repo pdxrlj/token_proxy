@@ -16,6 +16,10 @@ export function mockLog(): RequestLog {
   const models = ["gpt-4o", "deepseek-chat", "claude-sonnet-4", "qwen-max"];
   const statuses = [200, 200, 200, 429, 500];
   const s = statuses[Math.floor(Math.random() * statuses.length)];
+  const stream = Math.random() > 0.4;
+  const respBytes = stream
+    ? 2000 + Math.floor(Math.random() * 18000)
+    : 800 + Math.floor(Math.random() * 4000);
   return {
     id: `mock-${++seq}`,
     ts: Date.now() - Math.floor(Math.random() * 120000),
@@ -28,10 +32,15 @@ export function mockLog(): RequestLog {
     status: s,
     retries: s >= 500 ? Math.floor(Math.random() * 3) : 0,
     latency_ms: 300 + Math.floor(Math.random() * 4000),
-    stream: Math.random() > 0.4,
+    stream,
     error: s >= 400 ? "上游返回错误（示例数据）" : null,
     tokens_in: 100 + Math.floor(Math.random() * 900),
     tokens_out: 50 + Math.floor(Math.random() * 800),
+    response_bytes: respBytes,
+    ttfb_ms: stream
+      ? 80 + Math.floor(Math.random() * 600)
+      : 300 + Math.floor(Math.random() * 3500),
+    cache_hit: Math.random() > 0.75,
   };
 }
 
@@ -125,6 +134,9 @@ export function mockMetrics(): MetricsSnapshot {
     tokens_in: 483_200,
     tokens_out: 196_700,
     avg_latency_ms: 1240,
+    cache_hits: 312,
+    bytes_in: 1_920_000,
+    bytes_out: 8_640_000,
     recent,
   };
 }
