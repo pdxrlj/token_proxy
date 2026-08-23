@@ -141,6 +141,7 @@ async fn chat_completions(
             // 流式响应：头部返回即视为成功，流内错误走 error 事件
             let provider_name = log.provider.clone().unwrap_or_default();
             let model = log.model.clone();
+            let log_id = log.id.clone();
             state.metrics.inc_total();
             state.metrics.inc_success();
             state
@@ -150,7 +151,7 @@ async fn chat_completions(
             log.latency_ms = started.elapsed().as_millis() as u64;
             log.ttfb_ms = Some(log.latency_ms);
             finalize_log(&state, log);
-            forward_sse(state.clone(), provider_name, model, resp).into_response()
+            forward_sse(state.clone(), provider_name, model, resp, log_id).into_response()
         }
         Err(e) => {
             state.metrics.inc_total();
@@ -222,6 +223,9 @@ async fn fallback_proxy(
             log.status = 200;
             log.latency_ms = started.elapsed().as_millis() as u64;
             log.ttfb_ms = Some(log.latency_ms);
+            let provider_name = log.provider.clone().unwrap_or_default();
+            let model = log.model.clone();
+            let log_id = log.id.clone();
             finalize_log(&state, log);
             let ct = resp
                 .headers()
@@ -229,6 +233,11 @@ async fn fallback_proxy(
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("text/event-stream")
                 .to_string();
+            // SSE 流式：走 forward_sse 以统计字节数和 usage
+            if ct.contains("text/event-stream") {
+                return forward_sse(state.clone(), provider_name, model, resp, log_id)
+                    .into_response();
+            }
             (
                 StatusCode::OK,
                 [(header::CONTENT_TYPE, ct)],

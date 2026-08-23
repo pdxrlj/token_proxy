@@ -3,8 +3,8 @@ use crate::proxy::retry::ProxyError;
 use crate::proxy::state::AppState;
 use axum::body::Body;
 use axum::response::sse::{Event, KeepAlive, Sse};
-use futures_util::Stream;
 use futures_util::stream::StreamExt;
+use futures_util::Stream;
 use parking_lot::Mutex;
 use std::convert::Infallible;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -66,10 +66,10 @@ pub async fn call_upstream(
 
 /// 把上游响应体原样作为字节流转发（用于非 OpenAI 语义的兜底端点）
 pub fn forward_raw(resp: reqwest::Response) -> Body {
-    Body::from_stream(
-        resp.bytes_stream()
-            .map(|c| c.map(axum::body::Bytes::from).map_err(std::io::Error::other)),
-    )
+    Body::from_stream(resp.bytes_stream().map(|c| {
+        c.map(axum::body::Bytes::from)
+            .map_err(std::io::Error::other)
+    }))
 }
 
 /// SSE 流式转发：逐行解析并转发，统计 usage，断流时发 error 事件
@@ -78,6 +78,7 @@ pub fn forward_sse(
     provider_name: String,
     model: String,
     resp: reqwest::Response,
+    log_id: String,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let usage = Arc::new(Mutex::new(None::<(u64, u64)>));
     let bytes_total = Arc::new(AtomicU64::new(0));
@@ -159,13 +160,18 @@ pub fn forward_sse(
 
         // 流结束：写入 token 统计（usage 缺失时按字节近似）
         let (input, output) = (*usage.lock()).unwrap_or((0, 0));
+        let total_bytes = bytes_total.load(Ordering::Relaxed);
         let out_approx = if output == 0 {
-            (bytes_total.load(Ordering::Relaxed) / 4) as u64
+            (total_bytes / 4) as u64
         } else {
             output
         };
         metrics.add_tokens(input, out_approx);
-        metrics.add_bytes(0, bytes_total.load(Ordering::Relaxed));
+        metrics.add_bytes(0, total_bytes);
+        // 回写流式统计到对应日志条目
+        state
+            .metrics
+            .update_log_stream_stats(&log_id, total_bytes, Some(out_approx));
     };
 
     Sse::new(inner).keep_alive(KeepAlive::default())
