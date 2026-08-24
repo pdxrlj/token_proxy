@@ -85,7 +85,11 @@ proxy-core (Rust, 127.0.0.1:8787)
     "max_delay_ms": 8000,
     "retry_statuses": [408, 429, 500, 502, 503, 529],
     "retry_on_network_error": true,
-    "circuit_breaker": { "enabled": true, "failure_threshold": 5, "cooldown_secs": 30 }
+    "circuit_breaker": {
+      "enabled": true,
+      "failure_threshold": 5,
+      "cooldown_secs": 30,
+    },
   },
   "providers": [
     {
@@ -95,12 +99,16 @@ proxy-core (Rust, 127.0.0.1:8787)
       "api_key": "sk-...",
       "timeout_secs": 300,
       "enabled": true,
-      "models": ["gpt-4o", "gpt-4o-mini"]
-    }
+      "models": ["gpt-4o", "gpt-4o-mini"],
+    },
   ],
   "routes": [
-    { "model": "gpt-4o", "provider": "openai", "overrides": { "temperature": 0.2 } }
-  ]
+    {
+      "model": "gpt-4o",
+      "provider": "openai",
+      "overrides": { "temperature": 0.2 },
+    },
+  ],
 }
 ```
 
@@ -116,10 +124,6 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 
 ## 常见问题
 
-- **cargo 报 `SEC_E_NO_CREDENTIALS`（schannel TLS 失败）**：个别受限网络下
-  Windows 的 schannel 不可用。可运行 `node scripts/crates-proxy.mjs` 起本地
-  镜像（Node OpenSSL 上行），并参考 `.cargo/config.toml` 把 crates.io 指向
-  `sparse+http://127.0.0.1:8765/index/`。
 - **Node spawn EPERM（沙箱/受限环境）**：vite/esbuild 需要 spawn 子进程；
   若被环境拦截，前端构建可用 `node --import ./scripts/esbuild-wasm-loader.mjs
-  node_modules/vite/bin/vite.js build` 降级为 WASM 模式（无需 spawn）。
+node_modules/vite/bin/vite.js build` 降级为 WASM 模式（无需 spawn）。

@@ -130,10 +130,34 @@ impl Metrics {
     }
     pub fn record(&self, log: RequestLog) {
         let mut q = self.logs.lock();
-        if q.len() >= LOG_BUFFER {
-            q.pop_front();
+        // 按 ID 去重：如果已存在则更新，否则插入
+        if let Some(existing) = q.iter_mut().find(|l| l.id == log.id) {
+            *existing = log;
+        } else {
+            if q.len() >= LOG_BUFFER {
+                q.pop_front();
+            }
+            q.push_back(log);
         }
-        q.push_back(log);
+    }
+
+    /// 按 ID 查找日志（用于流式结束后回写后获取最新副本）
+    pub fn get_log(&self, id: &str) -> Option<RequestLog> {
+        let q = self.logs.lock();
+        q.iter().find(|l| l.id == id).cloned()
+    }
+
+    /// 更新日志条目并推送事件（用于流式结束后的局部更新）
+    pub fn update_and_emit(&self, id: &str, sink: Option<&dyn EventSink>) {
+        let log = {
+            let q = self.logs.lock();
+            q.iter().find(|l| l.id == id).cloned()
+        };
+        if let Some(log) = log {
+            if let Some(s) = sink {
+                s.emit_log(&log);
+            }
+        }
     }
 
     /// 流式响应结束后回写 response_bytes / tokens_out
@@ -235,6 +259,13 @@ impl AppState {
     pub fn emit_log(&self, log: &RequestLog) {
         if let Some(s) = self.sink.lock().as_ref() {
             s.emit_log(log);
+        }
+    }
+
+    /// 按 ID 查找日志并推送更新事件（用于流式结束后的局部刷新）
+    pub fn emit_log_update(&self, id: &str) {
+        if let Some(log) = self.metrics.get_log(id) {
+            self.emit_log(&log);
         }
     }
 }

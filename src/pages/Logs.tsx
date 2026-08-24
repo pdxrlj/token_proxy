@@ -90,10 +90,14 @@ export function Logs({ data }: { data: AppData }) {
                     <td>
                       <span
                         className={`status-badge ${
-                          r.status >= 400 || r.error ? "err" : "ok"
+                          r.status === 0
+                            ? "pending"
+                            : r.status >= 400 || r.error
+                            ? "err"
+                            : "ok"
                         } ${r.retries > 0 ? "retry" : ""}`}
                       >
-                        {r.status}
+                        {r.status === 0 ? "…" : r.status}
                       </span>
                     </td>
                     <td>

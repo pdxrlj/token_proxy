@@ -70,10 +70,47 @@ export function useAppData(): AppData {
   useEffect(() => {
     const unsub = onProxyLog((log: RequestLog) => {
       setMetrics((m) => {
-        const total = m.total + 1;
-        const success = m.success + (log.status >= 200 && log.status < 400 ? 1 : 0);
-        const failed = m.failed + (log.status >= 400 || log.error ? 1 : 0);
-        const cacheHits = (m.cache_hits ?? 0) + (log.cache_hit ? 1 : 0);
+        // 按 ID 去重：如果已存在则更新，否则插入到最前
+        const existingIdx = m.recent.findIndex((r) => r.id === log.id);
+        let recent: RequestLog[];
+        let total: number;
+        let success: number;
+        let failed: number;
+        let cacheHits: number;
+
+        if (existingIdx >= 0) {
+          // 更新已有条目（重试/流式结束后的局部刷新）
+          const prev = m.recent[existingIdx];
+          recent = m.recent.slice();
+          recent[existingIdx] = log;
+          // 只有从"进行中"(status=0) 变为完成时才更新计数
+          const wasPending = prev.status === 0;
+          const isDone = log.status !== 0;
+          if (wasPending && isDone) {
+            total = m.total + 1;
+            success = m.success + (log.status >= 200 && log.status < 400 ? 1 : 0);
+            failed = m.failed + (log.status >= 400 || log.error ? 1 : 0);
+          } else {
+            total = m.total;
+            success = m.success;
+            failed = m.failed;
+          }
+          // 缓存命中：只在首次变为 true 时累加
+          cacheHits = (m.cache_hits ?? 0) + (!prev.cache_hit && log.cache_hit ? 1 : 0);
+        } else {
+          // 新日志条目
+          recent = [log, ...m.recent].slice(0, 100);
+          const isPending = log.status === 0;
+          total = isPending ? m.total : m.total + 1;
+          success = isPending
+            ? m.success
+            : m.success + (log.status >= 200 && log.status < 400 ? 1 : 0);
+          failed = isPending
+            ? m.failed
+            : m.failed + (log.status >= 400 || log.error ? 1 : 0);
+          cacheHits = (m.cache_hits ?? 0) + (log.cache_hit ? 1 : 0);
+        }
+
         return {
           ...m,
           total,
@@ -81,8 +118,8 @@ export function useAppData(): AppData {
           failed,
           cache_hits: cacheHits,
           avg_latency_ms:
-            (m.avg_latency_ms * m.total + log.latency_ms) / total,
-          recent: [log, ...m.recent].slice(0, 100),
+            total > 0 ? (m.avg_latency_ms * (total - 1) + log.latency_ms) / total : 0,
+          recent,
         };
       });
       if (log.stream) {

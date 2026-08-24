@@ -236,6 +236,8 @@ pub fn forward_sse(
         state
             .metrics
             .update_log_cache_hit(&log_id, hit, ct_opt);
+        // 推送更新后的完整日志到前端（局部刷新字节数、tokens、缓存命中）
+        state.emit_log_update(&log_id);
 
         // 聚合 SSE chunks 并异步写入数据库
         let chunks = std::mem::take(&mut *collected.lock());

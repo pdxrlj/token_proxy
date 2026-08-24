@@ -995,6 +995,17 @@ body {
   background: var(--accent-soft);
 }
 
+.status-badge.pending {
+  color: var(--amber-strong);
+  background: var(--amber-soft);
+  animation: pulse-badge 1.2s ease-in-out infinite;
+}
+
+@keyframes pulse-badge {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
 .status-badge.err {
   color: var(--rose);
   background: var(--rose-soft);

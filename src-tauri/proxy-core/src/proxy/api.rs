@@ -116,6 +116,10 @@ async fn chat_completions(
         }
     }
 
+    // 请求开始即推送"进行中"日志（status=0 表示进行中）
+    state.metrics.record(log.clone());
+    state.emit_log(&log);
+
     let result = route_and_call(&state, "/chat/completions", &body, &mut log).await;
 
     match result {
@@ -231,6 +235,10 @@ async fn fallback_proxy(
     }
 
     let started = Instant::now();
+    // 请求开始即推送"进行中"日志（status=0 表示进行中）
+    state.metrics.record(log.clone());
+    state.emit_log(&log);
+
     match route_and_call(&state, &path, &body, &mut log).await {
         Ok(UpstreamOutcome::Json(v)) => {
             state.metrics.inc_total();
@@ -385,6 +393,10 @@ async fn route_and_call(
                 }
                 attempt += 1;
                 state.metrics.inc_retries();
+                log.retries = attempt;
+                // 推送重试更新（前端看到 retries 变化）
+                state.metrics.record(log.clone());
+                state.emit_log(&log);
                 warn!(
                     provider = %provider.id,
                     model = %model,

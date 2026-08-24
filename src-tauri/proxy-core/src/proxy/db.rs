@@ -141,10 +141,10 @@ impl Database {
         );
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         if let Some(m) = model_filter {
-            sql.push_str(" WHERE model LIKE ?1");
+            sql.push_str(" WHERE model LIKE ?");
             params_vec.push(Box::new(format!("%{m}%")));
         }
-        sql.push_str(" ORDER BY ts DESC LIMIT ?2 OFFSET ?3");
+        sql.push_str(" ORDER BY ts DESC LIMIT ? OFFSET ?");
         params_vec.push(Box::new(limit));
         params_vec.push(Box::new(offset));
         let params_ref: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
@@ -173,7 +173,7 @@ impl Database {
         let mut sql = String::from("SELECT finetune_jsonl FROM dataset");
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         if let Some(m) = model_filter {
-            sql.push_str(" WHERE model LIKE ?1");
+            sql.push_str(" WHERE model LIKE ?");
             params_vec.push(Box::new(format!("%{m}%")));
         }
         sql.push_str(" ORDER BY ts ASC");
