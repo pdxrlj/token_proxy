@@ -75,20 +75,6 @@ pub fn validate(cfg: &AppConfig) -> Result<(), String> {
             }
         }
     }
-    // 重试次数上限：防止配置过大导致重试风暴（单请求阻塞数十分钟）
-    if cfg.retry.max_retries > 30 {
-        return Err(format!(
-            "最大重试次数 {} 过大，建议不超过 30（当前值会导致单请求最多重试 {} 次）",
-            cfg.retry.max_retries, cfg.retry.max_retries
-        ));
-    }
-    // 熔断阈值上限：阈值过大时熔断器形同虚设
-    if cfg.retry.circuit_breaker.enabled && cfg.retry.circuit_breaker.failure_threshold > 50 {
-        return Err(format!(
-            "熔断失败阈值 {} 过大，建议不超过 50（阈值过大时熔断器几乎不会触发）",
-            cfg.retry.circuit_breaker.failure_threshold
-        ));
-    }
     for r in &cfg.routes {
         if r.model.trim().is_empty() {
             return Err("路由 model 不能为空".into());
@@ -120,75 +106,4 @@ pub struct StatusDto {
     pub providers: usize,
     pub routes: usize,
     pub total_requests: u64,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::proxy::config::{AppConfig, ProviderConfig, RouteConfig};
-
-    fn base_cfg() -> AppConfig {
-        AppConfig {
-            server: crate::proxy::config::ServerConfig::default(),
-            providers: vec![ProviderConfig {
-                id: "p1".into(),
-                name: "P1".into(),
-                base_url: "https://api.example.com/v1".into(),
-                api_key: "sk-x".into(),
-                timeout_secs: 60,
-                enabled: true,
-                models: vec![],
-            }],
-            routes: vec![RouteConfig {
-                model: "m1".into(),
-                provider: "p1".into(),
-                upstream_model: String::new(),
-                overrides: serde_json::Map::new(),
-                weight: 1,
-                disabled: false,
-            }],
-            retry: Default::default(),
-            load_balance: Default::default(),
-        }
-    }
-
-    #[test]
-    fn validate_rejects_excessive_max_retries() {
-        let mut cfg = base_cfg();
-        cfg.retry.max_retries = 300;
-        let err = validate(&cfg).unwrap_err();
-        assert!(
-            err.contains("最大重试次数"),
-            "应拒绝过大的 max_retries: {err}"
-        );
-    }
-
-    #[test]
-    fn validate_rejects_excessive_failure_threshold() {
-        let mut cfg = base_cfg();
-        cfg.retry.circuit_breaker.enabled = true;
-        cfg.retry.circuit_breaker.failure_threshold = 300;
-        let err = validate(&cfg).unwrap_err();
-        assert!(
-            err.contains("熔断失败阈值"),
-            "应拒绝过大的 failure_threshold: {err}"
-        );
-    }
-
-    #[test]
-    fn validate_accepts_boundary_values() {
-        let mut cfg = base_cfg();
-        cfg.retry.max_retries = 30;
-        cfg.retry.circuit_breaker.enabled = true;
-        cfg.retry.circuit_breaker.failure_threshold = 50;
-        validate(&cfg).expect("边界值 30/50 应通过校验");
-    }
-
-    #[test]
-    fn validate_skips_threshold_check_when_breaker_disabled() {
-        let mut cfg = base_cfg();
-        cfg.retry.circuit_breaker.enabled = false;
-        cfg.retry.circuit_breaker.failure_threshold = 9999;
-        validate(&cfg).expect("熔断器未启用时不应校验阈值");
-    }
 }

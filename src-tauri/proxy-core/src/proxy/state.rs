@@ -20,6 +20,9 @@ pub struct RequestLog {
     pub path: String,
     pub model: String,
     pub provider: Option<String>,
+    /// Provider id（内部使用：流中断时回写熔断器；不推送给前端）
+    #[serde(skip)]
+    pub provider_id: Option<String>,
     pub status: u16,
     pub retries: u32,
     pub latency_ms: u64,
@@ -53,6 +56,7 @@ impl RequestLog {
             path: String::new(),
             model: String::new(),
             provider: None,
+            provider_id: None,
             status: 0,
             retries: 0,
             latency_ms: 0,

@@ -66,7 +66,7 @@ pub fn select(
     // 1. 粘性优先
     if lb_cfg.sticky.enabled {
         if let Some(key) = session_key {
-            if let Some(idx) = lookup_sticky(state, key, candidates, lb_cfg) {
+            if let Some(idx) = lookup_sticky(state, key, candidates, lb_cfg, model) {
                 return Some(idx);
             }
         }
@@ -95,6 +95,7 @@ fn lookup_sticky(
     session_key: &str,
     candidates: &[Candidate<'_>],
     lb_cfg: &LoadBalanceConfig,
+    model: &str,
 ) -> Option<usize> {
     let entry = state.sticky_sessions.get(session_key)?;
     // 校验未过期
@@ -103,6 +104,11 @@ fn lookup_sticky(
     }
     // 校验候选索引仍有效（配置变更后候选数可能不同）
     if entry.candidate_index >= candidates.len() {
+        return None;
+    }
+    // 校验路由标识未变（配置调整或请求模型不同都会导致索引指向错误路线）
+    let expected = route_key_for_candidate(model, &candidates[entry.candidate_index]);
+    if entry.route_key != expected {
         return None;
     }
     debug!(
@@ -114,7 +120,7 @@ fn lookup_sticky(
 }
 
 /// 将选中结果写入粘性映射。
-fn record_sticky(
+pub fn record_sticky(
     state: &AppState,
     session_key: &str,
     index: usize,
@@ -194,7 +200,8 @@ fn weighted_random(candidates: &[Candidate<'_>]) -> Option<usize> {
 
 /// 按响应速度选择：EWMA 延迟最低的优先。
 ///
-/// 无数据时延迟视为 0（优先尝试以快速积累样本）。
+/// 无数据的候选延迟视为最慢（`u64::MAX`）：持续失败的上游永远没有成功样本，
+/// 若把未知延迟当作 0 会让它始终"看起来最快"而被优先选中。
 fn fastest_response(state: &AppState, candidates: &[Candidate<'_>], model: &str) -> Option<usize> {
     candidates
         .iter()
@@ -205,7 +212,7 @@ fn fastest_response(state: &AppState, candidates: &[Candidate<'_>], model: &str)
                 .route_latency
                 .get(&key)
                 .map(|s| s.avg_ms())
-                .unwrap_or(0)
+                .unwrap_or(u64::MAX)
         })
         .map(|(i, _)| i)
 }
@@ -458,6 +465,92 @@ mod tests {
 
         let idx = select(&state, &candidates, "m", None, &lb).unwrap();
         assert_eq!(candidates[idx].provider.id, "fast");
+    }
+
+    #[test]
+    fn fastest_response_avoids_unknown_latency() {
+        // 从未成功过（无延迟样本）的候选不应被视为"最快"
+        let mut cfg = AppConfig::default();
+        cfg.providers = vec![
+            ProviderConfig {
+                id: "known".into(),
+                models: vec!["m".into()],
+                ..ProviderConfig::demo()
+            },
+            ProviderConfig {
+                id: "unknown".into(),
+                models: vec!["m".into()],
+                ..ProviderConfig::demo()
+            },
+        ];
+        let state = make_state();
+        let candidates = make_candidates(&cfg, "m");
+
+        // 只给 "known" 记录延迟；"unknown" 无样本
+        record_latency(&state, &route_key("m", "known", ""), 120);
+
+        let lb = LoadBalanceConfig {
+            enabled: true,
+            strategy: LbStrategy::FastestResponse,
+            sticky: StickyConfig {
+                enabled: false,
+                ..Default::default()
+            },
+        };
+
+        let idx = select(&state, &candidates, "m", None, &lb).unwrap();
+        assert_eq!(
+            candidates[idx].provider.id, "known",
+            "无样本的候选不应优先于有样本的候选"
+        );
+    }
+
+    #[test]
+    fn sticky_miss_when_route_key_stale() {
+        let mut cfg = AppConfig::default();
+        cfg.providers = vec![
+            ProviderConfig {
+                id: "a".into(),
+                models: vec!["m".into()],
+                ..ProviderConfig::demo()
+            },
+            ProviderConfig {
+                id: "b".into(),
+                models: vec!["m".into()],
+                ..ProviderConfig::demo()
+            },
+        ];
+        let state = make_state();
+        let candidates = make_candidates(&cfg, "m");
+
+        // 手工写入一条 route_key 与当前候选不匹配的过期粘性记录
+        state.sticky_sessions.insert(
+            "sess-x".into(),
+            crate::proxy::state::StickyEntry {
+                candidate_index: 1,
+                route_key: "m|stale-provider|".into(),
+                created_at: Instant::now(),
+            },
+        );
+
+        let lb = LoadBalanceConfig {
+            enabled: true,
+            strategy: LbStrategy::RoundRobin,
+            sticky: StickyConfig {
+                enabled: true,
+                session_key_source: SessionKeySource::Header("x-session-id".into()),
+                ttl_secs: 1800,
+            },
+        };
+
+        let idx = select(&state, &candidates, "m", Some("sess-x"), &lb).unwrap();
+        // route_key 不匹配 → 粘性失效 → 重新选择并覆盖记录
+        let entry = state.sticky_sessions.get("sess-x").unwrap();
+        assert_eq!(
+            entry.candidate_index, idx,
+            "stale sticky entry should be re-selected and overwritten"
+        );
+        assert_eq!(entry.route_key, route_key_for_candidate("m", &candidates[idx]));
     }
 
     #[test]

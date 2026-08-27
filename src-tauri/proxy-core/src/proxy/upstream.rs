@@ -109,6 +109,9 @@ pub fn forward_raw(resp: reqwest::Response) -> Body {
 }
 
 /// SSE 流式转发：逐行解析并转发，统计 usage，断流时发 error 事件
+///
+/// `provider_id` 用于在上游流中断时向对应熔断器记一次失败，
+/// 使持续断流的上游也能被熔断/故障切换机制隔离。
 pub fn forward_sse(
     state: Arc<AppState>,
     provider_name: String,
@@ -121,6 +124,7 @@ pub fn forward_sse(
     log_upstream_model: Option<String>,
     log_provider: Option<String>,
     log_tokens_in: Option<u64>,
+    provider_id: Option<String>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     // 后台任务向此 channel 发送已序列化的 SSE data 行；客户端从接收端读取。
     // channel 容量有限：当客户端断连后接收端被丢弃，发送端会返回错误，
@@ -189,6 +193,12 @@ pub fn forward_sse(
                 }
                 Some(Err(e)) => {
                     warn!(provider = %provider_name, model = %model, error = %e, "upstream stream interrupted");
+                    // 断流计入熔断失败：持续断流的上游同样应被隔离
+                    if let Some(pid) = provider_id.as_deref() {
+                        if let Some(b) = state.breakers.get(pid) {
+                            b.on_failure();
+                        }
+                    }
                     let _ = tx
                         .send(
                             serde_json::json!({

@@ -1,5 +1,5 @@
 use crate::proxy::circuit::CircuitBreaker;
-use crate::proxy::config::{AppConfig, ProviderConfig, RouteConfig};
+use crate::proxy::config::{AppConfig, Candidate, ProviderConfig, RouteConfig};
 use crate::proxy::db::{build_finetune_jsonl, spawn_insert, InsertRecord};
 use crate::proxy::lb;
 use crate::proxy::retry::{backoff_delay, ProxyError};
@@ -175,6 +175,7 @@ async fn chat_completions(
             let log_upstream_model = log.upstream_model.clone();
             let log_provider = log.provider.clone();
             let log_tokens_in = log.tokens_in;
+            let log_provider_id = log.provider_id.clone();
             finalize_log(&state, log);
             forward_sse(
                 state.clone(),
@@ -188,6 +189,7 @@ async fn chat_completions(
                 log_upstream_model,
                 log_provider,
                 log_tokens_in,
+                log_provider_id,
             )
             .into_response()
         }
@@ -285,6 +287,7 @@ async fn fallback_proxy(
             let log_upstream_model = log.upstream_model.clone();
             let log_provider = log.provider.clone();
             let log_tokens_in = log.tokens_in;
+            let log_provider_id = log.provider_id.clone();
             let req_body = body.clone();
             finalize_log(&state, log);
             let ct = resp
@@ -307,6 +310,7 @@ async fn fallback_proxy(
                     log_upstream_model,
                     log_provider,
                     log_tokens_in,
+                    log_provider_id,
                 )
                 .into_response();
             }
@@ -342,6 +346,8 @@ struct RoutingContext {
     candidates: Vec<(ProviderConfig, Option<RouteConfig>)>,
     /// 负载均衡选中的初始候选索引
     selected_idx: usize,
+    /// 会话标识（粘性路由用；未启用或提取失败时为 None）
+    session_key: Option<String>,
 }
 
 /// 解析路由上下文：候选路由 + 负载均衡选择 + 重试/熔断配置。
@@ -387,6 +393,7 @@ fn resolve_routing_context(
         breaker_cfg: cfg.retry.circuit_breaker.clone(),
         candidates,
         selected_idx,
+        session_key,
     })
 }
 
@@ -396,11 +403,13 @@ fn resolve_routing_context(
 /// 1. 解析路由上下文（候选 + LB 选择）
 /// 2. 对选中候选执行请求：熔断检查 → 在途计数 → 调用上游
 /// 3. 成功则记录延迟并返回；失败则按重试策略退避重试
-/// 4. 重试耗尽或熔断打开时，若 LB 启用且还有候选 → failover 到下一候选
+/// 4. 重试耗尽或熔断打开时，若还有候选 → failover 到下一候选
+///    （无论负载均衡开关是否启用，故障切换始终生效）
 ///
 /// # 粘性保证
-/// 重试始终在同一候选上进行（不切换上游），避免上下文丢失；
-/// 仅在熔断打开或不可重试错误时才 failover。
+/// 重试始终在同一候选上进行（不切换上游），避免上游缓存失效；
+/// 仅在熔断打开或重试耗尽时才 failover，且 failover 成功后
+/// 会把粘性记录更新到实际成功的候选，后续同会话请求直达健康上游。
 async fn route_and_call(
     state: &Arc<AppState>,
     headers: &HeaderMap,
@@ -422,6 +431,7 @@ async fn route_and_call(
         breaker_cfg,
         candidates,
         selected_idx,
+        session_key,
     } = ctx;
 
     let total_candidates = candidates.len();
@@ -434,6 +444,7 @@ async fn route_and_call(
         let body = apply_overrides(body, route.as_ref());
 
         log.provider = Some(provider.name.clone());
+        log.provider_id = Some(provider.id.clone());
 
         // 记录实际转发给上游的模型名（经 upstream_model 改写后）
         if let Some(m) = body.get("model").and_then(|m| m.as_str()) {
@@ -450,7 +461,7 @@ async fn route_and_call(
 
         // ── 2. 熔断检查：打开时 failover 到下一候选 ──
         if breaker_cfg.enabled && breaker.before_request().is_err() {
-            if lb_cfg.enabled && candidates_tried < total_candidates {
+            if candidates_tried < total_candidates {
                 warn!(
                     provider = %provider.id,
                     model = %model,
@@ -483,6 +494,18 @@ async fn route_and_call(
                     &inflight_key,
                     call_started.elapsed().as_millis() as u64,
                 );
+                // failover 成功后把粘性更新到实际成功的候选，
+                // 避免同会话下一个请求又撞回故障上游
+                if current_idx != selected_idx && lb_cfg.sticky.enabled {
+                    if let Some(key) = session_key.as_deref() {
+                        let cand = Candidate {
+                            provider,
+                            route: route.as_ref(),
+                            index: current_idx,
+                        };
+                        lb::record_sticky(state, key, current_idx, &cand, model);
+                    }
+                }
                 log.retries = attempt;
                 return Ok(outcome);
             }
@@ -513,7 +536,7 @@ async fn route_and_call(
                     breaker.on_failure();
                 }
                 lb::dec_in_flight(state, &inflight_key);
-                if lb_cfg.enabled && candidates_tried < total_candidates {
+                if candidates_tried < total_candidates {
                     warn!(
                         provider = %provider.id,
                         model = %model,
