@@ -1,4 +1,4 @@
-//! SQLite 持久化：把成功请求的 prompt + completion 存为微调数据集。
+//! SQLite 持久化：把成功请求的 prompt + completion 存为数据存储。
 //!
 //! 表结构设计兼容 OpenAI 微调格式（messages 数组），同时保留原始请求/响应
 //! JSON 以便后续灵活处理。
@@ -10,7 +10,7 @@ use std::path::Path;
 use std::sync::Arc;
 use tracing::warn;
 
-/// 一条微调数据集记录
+/// 一条数据存储记录
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatasetRecord {
     pub id: i64,
@@ -30,7 +30,7 @@ pub struct DatasetRecord {
     pub request_body: String,
     /// 响应体 JSON（非流式为完整响应；流式为聚合后的 choices 数组）
     pub response_body: String,
-    /// 微调格式：{"messages": [...]} 可直接用于 OpenAI fine-tuning
+    /// JSONL 格式：{"messages": [...]} 可直接用于 OpenAI fine-tuning
     pub finetune_jsonl: String,
 }
 
@@ -167,7 +167,7 @@ impl Database {
         }
     }
 
-    /// 导出为 JSONL 字符串（微调格式，每行一条）
+    /// 导出为 JSONL 字符串（每行一条）
     pub fn export_jsonl(&self, model_filter: Option<&str>) -> rusqlite::Result<String> {
         let conn = self.conn.lock();
         let mut sql = String::from("SELECT finetune_jsonl FROM dataset");
@@ -224,7 +224,7 @@ fn map_record(row: &Row) -> rusqlite::Result<DatasetRecord> {
     })
 }
 
-/// 构建微调格式 JSONL：{"messages": [{"role":"system","content":"..."}, ...]}
+/// 构建 JSONL：{"messages": [{"role":"system","content":"..."}, ...]}
 /// 从请求体提取 messages 数组，从响应提取 assistant 回复内容。
 pub fn build_finetune_jsonl(
     request_body: &serde_json::Value,
@@ -260,7 +260,7 @@ pub fn build_finetune_jsonl(
             .to_string()
     };
 
-    // 构建微调样本：messages + assistant 回复
+    // 构建 JSONL 样本：messages + assistant 回复
     let mut finetune_messages = messages.clone();
     if let Some(arr) = finetune_messages.as_array_mut() {
         arr.push(serde_json::json!({

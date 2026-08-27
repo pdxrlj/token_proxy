@@ -450,7 +450,7 @@ fn finalize_log(state: &Arc<AppState>, log: RequestLog) {
     state.emit_log(&log);
 }
 
-/// 把成功请求的 prompt + completion 存入 SQLite（用于后续微调）
+/// 把成功请求的 prompt + completion 存入 SQLite（用于数据存储）
 fn save_to_db(
     state: &Arc<AppState>,
     log: &RequestLog,

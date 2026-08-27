@@ -121,7 +121,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   routes: [],
 };
 
-/** 微调数据集记录（对应 Rust DatasetRecord） */
+/** 数据存储记录（对应 Rust DatasetRecord） */
 export interface DatasetRecord {
   id: number;
   ts: number;

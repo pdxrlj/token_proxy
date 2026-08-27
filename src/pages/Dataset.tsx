@@ -56,7 +56,7 @@ export function Dataset() {
       a.download = `dataset-${Date.now()}.jsonl`;
       a.click();
       URL.revokeObjectURL(url);
-      toast(`已导出 ${total} 条微调数据`);
+      toast(`已导出 ${total} 条数据`);
     } catch (e) {
       toast(`导出失败：${e}`, "err");
     }
@@ -102,7 +102,7 @@ export function Dataset() {
         <div style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 200 }}>
           <Database size={16} style={{ color: "var(--accent)" }} />
           <span style={{ color: "var(--text-2)", fontSize: 13 }}>
-            共 <span className="mono" style={{ color: "var(--text-1)" }}>{fmtCount(total)}</span> 条微调数据
+            共 <span className="mono" style={{ color: "var(--text-1)" }}>{fmtCount(total)}</span> 条数据
           </span>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -136,7 +136,7 @@ export function Dataset() {
           <div className="empty">
             <Inbox size={28} />
             <div>
-              数据集为空。成功的请求会自动存入此处，可用于模型微调。
+              数据集为空。成功的请求会自动存入此处。
               <br />
               <span style={{ fontSize: 12, color: "var(--text-3)" }}>
                 发起一次 chat/completions 请求后，数据会出现在这里。

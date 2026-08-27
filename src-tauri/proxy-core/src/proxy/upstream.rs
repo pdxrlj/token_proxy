@@ -7,8 +7,8 @@ use futures_util::stream::StreamExt;
 use futures_util::Stream;
 use parking_lot::Mutex;
 use std::convert::Infallible;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use tokio::sync::mpsc;
 use tracing::warn;
 
 /// 上游调用结果：完整 JSON 或 可转发的响应流
@@ -122,17 +122,27 @@ pub fn forward_sse(
     log_provider: Option<String>,
     log_tokens_in: Option<u64>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let usage = Arc::new(Mutex::new(None::<(u64, u64)>));
-    let cache_hit = Arc::new(AtomicBool::new(false));
-    let cached_tokens = Arc::new(AtomicU64::new(0));
-    let bytes_total = Arc::new(AtomicU64::new(0));
-    let metrics = state.metrics.clone();
-    // 收集所有 SSE data 行，用于流结束后聚合
-    let collected: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    // 后台任务向此 channel 发送已序列化的 SSE data 行；客户端从接收端读取。
+    // channel 容量有限：当客户端断连后接收端被丢弃，发送端会返回错误，
+    // 后台任务据此感知断连但仍会继续消费完上游流并完成统计写入。
+    let (tx, mut rx) = mpsc::channel::<String>(64);
 
-    let inner = async_stream::stream! {
+    // 后台任务：消费上游字节流，解析 SSE 行，统计 usage / 字节，聚合入库
+    tokio::spawn(async move {
+        let usage = Mutex::new(None::<(u64, u64)>);
+        let mut cache_hit = false;
+        let mut cached_tokens: u64 = 0;
+        let mut bytes_total: u64 = 0;
+        let mut collected: Vec<String> = Vec::new();
         let mut buf: Vec<u8> = Vec::new();
         let mut stream = resp.bytes_stream();
+
+        // 辅助：处理一行 SSE，返回 true 表示应继续，false 表示遇到 [DONE] 或错误
+        let send = |data: String, tx: &mpsc::Sender<String>| -> bool {
+            // channel 发送失败说明客户端已断连，但这里仍返回 true 继续消费上游
+            let _ = tx.try_send(data);
+            true
+        };
 
         'outer: loop {
             // 缓冲中已有完整行 → 切出并转发
@@ -147,30 +157,26 @@ pub fn forward_sse(
                     if data != "[DONE]" {
                         if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
                             if let Some(u) = v.get("usage") {
-                                let input = u
-                                    .get("prompt_tokens")
-                                    .and_then(|x| x.as_u64())
-                                    .unwrap_or(0);
+                                let input =
+                                    u.get("prompt_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
                                 let output = u
                                     .get("completion_tokens")
                                     .and_then(|x| x.as_u64())
                                     .unwrap_or(0);
                                 *usage.lock() = Some((input, output));
-                                // 缓存命中检测 + 缓存 token 数提取
                                 let ct = extract_cached_tokens(u);
                                 if ct > 0 {
-                                    cache_hit.store(true, Ordering::Relaxed);
-                                    cached_tokens.store(ct, Ordering::Relaxed);
+                                    cache_hit = true;
+                                    cached_tokens = ct;
                                 }
                             }
                         }
-                        // 收集 data 行用于后续聚合
-                        collected.lock().push(data.to_string());
+                        collected.push(data.to_string());
                     }
-                    yield Ok(Event::default().data(data.to_string()));
+                    send(data.to_string(), &tx);
                 } else {
                     // 非标准行，保底原样透传
-                    yield Ok(Event::default().data(line));
+                    send(line, &tx);
                 }
                 continue;
             }
@@ -178,25 +184,23 @@ pub fn forward_sse(
             // 缓冲不足一行，读取下一数据块
             match stream.next().await {
                 Some(Ok(bytes)) => {
-                    bytes_total.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                    bytes_total += bytes.len() as u64;
                     buf.extend_from_slice(&bytes);
                 }
                 Some(Err(e)) => {
                     warn!(provider = %provider_name, model = %model, error = %e, "upstream stream interrupted");
-                    yield Ok(
-                        Event::default()
-                            .event("error")
-                            .data(
-                                serde_json::json!({
-                                    "error": {
-                                        "message": format!("upstream stream interrupted: {e}"),
-                                        "type": "upstream_stream_error",
-                                        "code": null,
-                                    }
-                                })
-                                .to_string(),
-                            ),
-                    );
+                    let _ = tx
+                        .send(
+                            serde_json::json!({
+                                "error": {
+                                    "message": format!("upstream stream interrupted: {e}"),
+                                    "type": "upstream_stream_error",
+                                    "code": null,
+                                }
+                            })
+                            .to_string(),
+                        )
+                        .await;
                     break 'outer;
                 }
                 None => {
@@ -206,9 +210,9 @@ pub fn forward_sse(
                         if let Some(data) = tail.strip_prefix("data:") {
                             let data = data.trim();
                             if data != "[DONE]" {
-                                collected.lock().push(data.to_string());
+                                collected.push(data.to_string());
                             }
-                            yield Ok(Event::default().data(data.to_string()));
+                            send(data.to_string(), &tx);
                         }
                     }
                     break 'outer;
@@ -216,42 +220,36 @@ pub fn forward_sse(
             }
         }
 
-        // 流结束：写入 token 统计（usage 缺失时按字节近似）
+        // 上游流结束（或出错）：无论客户端是否断连，都完成统计写入
         let (input, output) = (*usage.lock()).unwrap_or((0, 0));
-        let total_bytes = bytes_total.load(Ordering::Relaxed);
         let out_approx = if output == 0 {
-            (total_bytes / 4) as u64
+            (bytes_total / 4) as u64
         } else {
             output
         };
-        metrics.add_tokens(input, out_approx);
-        metrics.add_bytes(0, total_bytes);
-        let hit = cache_hit.load(Ordering::Relaxed);
-        let ct = cached_tokens.load(Ordering::Relaxed);
-        let ct_opt = if ct > 0 { Some(ct) } else { None };
+        state.metrics.add_tokens(input, out_approx);
+        state.metrics.add_bytes(0, bytes_total);
+        let ct_opt = if cached_tokens > 0 {
+            Some(cached_tokens)
+        } else {
+            None
+        };
         // 回写流式统计到对应日志条目（含缓存命中状态）
         state
             .metrics
-            .update_log_stream_stats(&log_id, total_bytes, Some(out_approx));
+            .update_log_stream_stats(&log_id, bytes_total, Some(out_approx));
         state
             .metrics
-            .update_log_cache_hit(&log_id, hit, ct_opt);
+            .update_log_cache_hit(&log_id, cache_hit, ct_opt);
         // 推送更新后的完整日志到前端（局部刷新字节数、tokens、缓存命中）
         state.emit_log_update(&log_id);
 
         // 聚合 SSE chunks 并异步写入数据库
-        let chunks = std::mem::take(&mut *collected.lock());
-        // 把 String 解析为 serde_json::Value
-        let chunk_vals: Vec<serde_json::Value> = chunks
+        let chunk_vals: Vec<serde_json::Value> = collected
             .iter()
             .filter_map(|s| serde_json::from_str::<serde_json::Value>(s).ok())
             .collect();
-        let agg = crate::proxy::db::aggregate_stream_response(
-            &chunk_vals,
-            &model,
-            *usage.lock(),
-        );
-        // 写入 DB
+        let agg = crate::proxy::db::aggregate_stream_response(&chunk_vals, &model, *usage.lock());
         let db_guard = state.db.lock().clone();
         if let Some(db) = db_guard {
             let req_str = serde_json::to_string(&req_body).unwrap_or_default();
@@ -267,13 +265,22 @@ pub fn forward_sse(
                     stream: true,
                     tokens_in: log_tokens_in,
                     tokens_out: Some(out_approx),
-                    cache_hit: hit,
+                    cache_hit,
                     cached_tokens: ct_opt,
                     request_body: req_str,
                     response_body: resp_str,
                     finetune_jsonl: finetune,
                 },
             );
+        }
+        // drop tx 让接收端收到 None 从而结束客户端流
+        drop(tx);
+    });
+
+    // 客户端流：从 channel 接收已序列化的 data，包装为 SSE Event 转发
+    let inner = async_stream::stream! {
+        while let Some(data) = rx.recv().await {
+            yield Ok(Event::default().data(data));
         }
     };
 

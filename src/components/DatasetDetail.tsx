@@ -108,7 +108,7 @@ export function DatasetDetailModal({
   onClose: () => void;
 }) {
   return (
-    <Modal title={`微调数据 #${record.id}`} onClose={onClose}>
+    <Modal title={`数据记录 #${record.id}`} onClose={onClose}>
       {/* 元信息 */}
       <div
         style={{
@@ -166,7 +166,7 @@ export function DatasetDetailModal({
       <JsonBlock label="请求体（OpenAI 格式）" json={record.request_body} />
       <JsonBlock label="响应体" json={record.response_body} />
 
-      {/* 微调格式 */}
+      {/* JSONL 格式 */}
       <div
         style={{
           display: "flex",
@@ -178,7 +178,7 @@ export function DatasetDetailModal({
       >
         <FileText size={14} style={{ color: "var(--green)" }} />
         <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text-2)" }}>
-          微调 JSONL（可直接用于 OpenAI fine-tuning）
+          JSONL（可用于 OpenAI fine-tuning）
         </span>
       </div>
       <JsonBlock label="finetune_jsonl" json={record.finetune_jsonl} />

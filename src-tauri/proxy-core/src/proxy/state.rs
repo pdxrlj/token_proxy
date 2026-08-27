@@ -233,7 +233,7 @@ pub struct AppState {
     pub started_at: std::time::Instant,
     /// 事件推送器，桌面运行时注入；纯测试时为空
     pub sink: Mutex<Option<Arc<dyn EventSink>>>,
-    /// SQLite 数据集存储（可选；测试时可为 None）
+    /// SQLite 数据存储（可选；测试时可为 None）
     pub db: Mutex<Option<Arc<Database>>>,
 }
 

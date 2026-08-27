@@ -179,7 +179,7 @@ pub fn run() {
                 app: app.handle().clone(),
             }));
 
-            // 初始化 SQLite 数据集存储
+            // 初始化 SQLite 数据存储
             let db_path = default_db_path();
             tracing::info!("dataset db at {}", db_path.display());
             match init_db(&db_path) {
