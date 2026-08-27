@@ -67,8 +67,14 @@ export function useAppData(): AppData {
   }, [refresh]);
 
   // 事件订阅：请求日志 → 更新统计 + 流式指示
+  // 使用 ref 标记是否已取消，防止 StrictMode 双挂载下 listen Promise 未 resolve
+  // 时 cleanup 执行导致短暂双订阅
   useEffect(() => {
-    const unsub = onProxyLog((log: RequestLog) => {
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+
+    onProxyLog((log: RequestLog) => {
+      if (cancelled) return;
       setMetrics((m) => {
         // 按 ID 去重：如果已存在则更新，否则插入到最前
         const existingIdx = m.recent.findIndex((r) => r.id === log.id);
@@ -131,19 +137,39 @@ export function useAppData(): AppData {
           if (streamCount.current === 0) setStreaming(false);
         }, 1500);
       }
+    }).then((f) => {
+      if (cancelled) {
+        // cleanup 已执行，立即取消订阅
+        f();
+      } else {
+        unlisten = f;
+      }
     });
+
     return () => {
-      unsub.then((f) => f());
+      cancelled = true;
+      if (unlisten) unlisten();
     };
   }, []);
 
   // 配置热重载
   useEffect(() => {
-    const unsub = onConfigChanged(() => {
-      refresh();
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+
+    onConfigChanged(() => {
+      if (!cancelled) refresh();
+    }).then((f) => {
+      if (cancelled) {
+        f();
+      } else {
+        unlisten = f;
+      }
     });
+
     return () => {
-      unsub.then((f) => f());
+      cancelled = true;
+      if (unlisten) unlisten();
     };
   }, [refresh]);
 

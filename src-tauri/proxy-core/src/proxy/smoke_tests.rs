@@ -165,6 +165,8 @@ async fn spawn_proxy_with_key(
         provider: "mock".into(),
         upstream_model: String::new(),
         overrides: serde_json::Map::new(),
+        weight: 1,
+        disabled: false,
     }];
     if let Some(n) = retry_override {
         cfg.retry.max_retries = n;

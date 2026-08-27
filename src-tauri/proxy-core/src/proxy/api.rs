@@ -1,6 +1,7 @@
 use crate::proxy::circuit::CircuitBreaker;
-use crate::proxy::config::AppConfig;
+use crate::proxy::config::{AppConfig, ProviderConfig, RouteConfig};
 use crate::proxy::db::{build_finetune_jsonl, spawn_insert, InsertRecord};
+use crate::proxy::lb;
 use crate::proxy::retry::{backoff_delay, ProxyError};
 use crate::proxy::state::{AppState, RequestLog};
 use crate::proxy::upstream::{
@@ -120,7 +121,7 @@ async fn chat_completions(
     state.metrics.record(log.clone());
     state.emit_log(&log);
 
-    let result = route_and_call(&state, "/chat/completions", &body, &mut log).await;
+    let result = route_and_call(&state, &headers, "/chat/completions", &body, &mut log).await;
 
     match result {
         Ok(UpstreamOutcome::Json(v)) => {
@@ -239,7 +240,7 @@ async fn fallback_proxy(
     state.metrics.record(log.clone());
     state.emit_log(&log);
 
-    match route_and_call(&state, &path, &body, &mut log).await {
+    match route_and_call(&state, &headers, &path, &body, &mut log).await {
         Ok(UpstreamOutcome::Json(v)) => {
             state.metrics.inc_total();
             state.metrics.inc_success();
@@ -332,9 +333,77 @@ async fn fallback_proxy(
     }
 }
 
-/// 路由 + 熔断 + 重试循环
+/// 路由上下文：从配置中解析出的负载均衡、重试、熔断配置和候选列表。
+struct RoutingContext {
+    lb_cfg: crate::proxy::config::LoadBalanceConfig,
+    retry_cfg: crate::proxy::config::RetryConfig,
+    breaker_cfg: crate::proxy::config::CircuitBreakerConfig,
+    /// 候选列表（已 clone 出 read lock）：(provider, route)
+    candidates: Vec<(ProviderConfig, Option<RouteConfig>)>,
+    /// 负载均衡选中的初始候选索引
+    selected_idx: usize,
+}
+
+/// 解析路由上下文：候选路由 + 负载均衡选择 + 重试/熔断配置。
+///
+/// 在 read lock 内完成候选解析和 LB 选择，然后 clone 出锁外。
+fn resolve_routing_context(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    body: &serde_json::Value,
+    model: &str,
+) -> Result<RoutingContext, ProxyError> {
+    let cfg = state.config.read();
+    let candidates = cfg.resolve_candidates(model);
+    if candidates.is_empty() {
+        return Err(ProxyError::RouteNotFound(model.to_string()));
+    }
+
+    let lb_cfg = cfg.load_balance.clone();
+
+    // 提取会话 Key（用于粘性路由）
+    let session_key = if lb_cfg.sticky.enabled {
+        lb::extract_session_key(headers, body, &lb_cfg.sticky.session_key_source)
+    } else {
+        None
+    };
+
+    // 负载均衡选择（在 read lock 内完成，因为 select 需要引用候选）
+    let selected_idx = if lb_cfg.enabled && candidates.len() > 1 {
+        lb::select(state, &candidates, model, session_key.as_deref(), &lb_cfg).unwrap_or(0)
+    } else {
+        0
+    };
+
+    // Clone 候选数据出 read lock
+    let candidates: Vec<(ProviderConfig, Option<RouteConfig>)> = candidates
+        .into_iter()
+        .map(|c| (c.provider.clone(), c.route.cloned()))
+        .collect();
+
+    Ok(RoutingContext {
+        lb_cfg,
+        retry_cfg: cfg.retry.clone(),
+        breaker_cfg: cfg.retry.circuit_breaker.clone(),
+        candidates,
+        selected_idx,
+    })
+}
+
+/// 路由 + 负载均衡 + 熔断 + 重试 + failover 循环。
+///
+/// # 流程
+/// 1. 解析路由上下文（候选 + LB 选择）
+/// 2. 对选中候选执行请求：熔断检查 → 在途计数 → 调用上游
+/// 3. 成功则记录延迟并返回；失败则按重试策略退避重试
+/// 4. 重试耗尽或熔断打开时，若 LB 启用且还有候选 → failover 到下一候选
+///
+/// # 粘性保证
+/// 重试始终在同一候选上进行（不切换上游），避免上下文丢失；
+/// 仅在熔断打开或不可重试错误时才 failover。
 async fn route_and_call(
     state: &Arc<AppState>,
+    headers: &HeaderMap,
     path: &str,
     body: &serde_json::Value,
     log: &mut RequestLog,
@@ -345,58 +414,90 @@ async fn route_and_call(
         .filter(|m| !m.is_empty())
         .ok_or_else(|| ProxyError::BadRequest("model is required".into()))?;
 
-    let (breaker_cfg, retry_cfg, provider) = {
-        let cfg = state.config.read();
-        let (provider, route) = cfg
-            .resolve_provider(model)
-            .ok_or_else(|| ProxyError::RouteNotFound(model.to_string()))?;
-        let retry_cfg = cfg.retry.clone();
-        let breaker_cfg = cfg.retry.circuit_breaker.clone();
-        let provider = provider.clone();
-        let body = apply_overrides(body, route);
-        (breaker_cfg, retry_cfg, (provider, body))
-    };
+    // ── 1. 解析路由上下文 ──
+    let ctx = resolve_routing_context(state, headers, body, model)?;
+    let RoutingContext {
+        lb_cfg,
+        retry_cfg,
+        breaker_cfg,
+        candidates,
+        selected_idx,
+    } = ctx;
 
-    let (provider, body) = provider;
-    log.provider = Some(provider.name.clone());
-
-    // 记录实际转发给上游的模型名（经 upstream_model 改写后）
-    if let Some(m) = body.get("model").and_then(|m| m.as_str()) {
-        if m != model {
-            log.upstream_model = Some(m.to_string());
-        }
-    }
-
-    let breaker = state
-        .breakers
-        .entry(provider.id.clone())
-        .or_insert_with(|| Arc::new(CircuitBreaker::new(breaker_cfg.clone())))
-        .clone();
-
+    let total_candidates = candidates.len();
+    let mut current_idx = selected_idx;
     let mut attempt: u32 = 0;
+    let mut candidates_tried: usize = 1;
+
     loop {
-        if !breaker_cfg.enabled {
-            // 熔断关闭时直接放行
-        } else if let Err(_) = breaker.before_request() {
+        let (provider, route) = &candidates[current_idx];
+        let body = apply_overrides(body, route.as_ref());
+
+        log.provider = Some(provider.name.clone());
+
+        // 记录实际转发给上游的模型名（经 upstream_model 改写后）
+        if let Some(m) = body.get("model").and_then(|m| m.as_str()) {
+            if m != model {
+                log.upstream_model = Some(m.to_string());
+            }
+        }
+
+        let breaker = state
+            .breakers
+            .entry(provider.id.clone())
+            .or_insert_with(|| Arc::new(CircuitBreaker::new(breaker_cfg.clone())))
+            .clone();
+
+        // ── 2. 熔断检查：打开时 failover 到下一候选 ──
+        if breaker_cfg.enabled && breaker.before_request().is_err() {
+            if lb_cfg.enabled && candidates_tried < total_candidates {
+                warn!(
+                    provider = %provider.id,
+                    model = %model,
+                    "circuit open, failing over to next candidate"
+                );
+                current_idx = (current_idx + 1) % total_candidates;
+                candidates_tried += 1;
+                attempt = 0;
+                continue;
+            }
             return Err(ProxyError::CircuitOpen(provider.id.clone()));
         }
 
-        match call_upstream(state, &provider, path, body.clone()).await {
+        // ── 3. 在途计数 + 调用上游 ──
+        let upstream_model_str = route
+            .as_ref()
+            .map(|r| r.upstream_model.as_str())
+            .unwrap_or("");
+        let inflight_key = lb::route_key(model, &provider.id, upstream_model_str);
+        lb::inc_in_flight(state, &inflight_key);
+        let call_started = Instant::now();
+
+        match call_upstream(state, provider, path, body.clone()).await {
             Ok(outcome) => {
+                // 成功：记录延迟样本，返回结果
                 breaker.on_success();
+                lb::dec_in_flight(state, &inflight_key);
+                lb::record_latency(
+                    state,
+                    &inflight_key,
+                    call_started.elapsed().as_millis() as u64,
+                );
                 log.retries = attempt;
                 return Ok(outcome);
             }
             Err(e) if e.retriable(&retry_cfg) && attempt < retry_cfg.max_retries => {
+                // 可重试错误：退避后重试（同一候选，保持上下文）
                 if breaker_cfg.enabled {
                     breaker.on_failure();
                 }
+                lb::dec_in_flight(state, &inflight_key);
                 attempt += 1;
                 state.metrics.inc_retries();
                 log.retries = attempt;
                 // 推送重试更新（前端看到 retries 变化）
                 state.metrics.record(log.clone());
-                state.emit_log(&log);
+                state.emit_log(log);
                 warn!(
                     provider = %provider.id,
                     model = %model,
@@ -407,8 +508,22 @@ async fn route_and_call(
                 tokio::time::sleep(backoff_delay(attempt, &retry_cfg)).await;
             }
             Err(e) => {
+                // 不可重试或重试耗尽：failover 到下一候选
                 if breaker_cfg.enabled {
                     breaker.on_failure();
+                }
+                lb::dec_in_flight(state, &inflight_key);
+                if lb_cfg.enabled && candidates_tried < total_candidates {
+                    warn!(
+                        provider = %provider.id,
+                        model = %model,
+                        error = %e,
+                        "exhausted retries, failing over to next candidate"
+                    );
+                    current_idx = (current_idx + 1) % total_candidates;
+                    candidates_tried += 1;
+                    attempt = 0;
+                    continue;
                 }
                 return Err(e);
             }
@@ -416,7 +531,9 @@ async fn route_and_call(
     }
 }
 
-/// 路由参数改写：upstream_model 覆盖 model 字段，route.overrides 覆盖其余字段
+/// 路由参数改写：`upstream_model` 覆盖 `model` 字段，`route.overrides` 覆盖其余字段。
+///
+/// 应用顺序：先 `upstream_model`，再 `overrides`（后者可进一步覆盖任意字段，包括 model）。
 fn apply_overrides(
     body: &serde_json::Value,
     route: Option<&crate::proxy::config::RouteConfig>,

@@ -9,6 +9,7 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 /// 一条已完成的请求记录（推给前端展示）
 #[derive(Debug, Clone, Serialize)]
@@ -222,7 +223,75 @@ pub trait EventSink: Send + Sync {
     fn emit_config_changed(&self);
 }
 
-/// 全局共享状态
+// ─────────────────────────── 负载均衡运行时统计 ───────────────────────────
+
+/// 单条路由的延迟统计（EWMA：指数加权移动平均）。
+///
+/// EWMA 公式：`avg = alpha * new + (1 - alpha) * old`，其中 `alpha = 0.3`。
+/// 相比简单平均，EWMA 对近期延迟更敏感，能更快反映上游性能变化，
+/// 供 `FastestResponse` 策略使用。
+pub struct RouteLatencyStats {
+    /// 指数加权移动平均延迟（毫秒）
+    ewma_ms: AtomicU64,
+    /// 样本数
+    samples: AtomicU64,
+}
+
+impl RouteLatencyStats {
+    pub fn new() -> Self {
+        Self {
+            ewma_ms: AtomicU64::new(0),
+            samples: AtomicU64::new(0),
+        }
+    }
+
+    /// 记录一次延迟样本，更新 EWMA。alpha = 0.3（新样本权重 30%）
+    pub fn record_latency(&self, latency_ms: u64) {
+        let prev = self.ewma_ms.load(Ordering::Relaxed);
+        let new = if prev == 0 {
+            latency_ms
+        } else {
+            // EWMA = alpha * new + (1 - alpha) * old
+            ((latency_ms as f64 * 0.3) + (prev as f64 * 0.7)) as u64
+        };
+        self.ewma_ms.store(new, Ordering::Relaxed);
+        self.samples.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 当前 EWMA 延迟（毫秒）；0 表示尚无数据
+    pub fn avg_ms(&self) -> u64 {
+        self.ewma_ms.load(Ordering::Relaxed)
+    }
+
+    /// 已采集样本数
+    pub fn sample_count(&self) -> u64 {
+        self.samples.load(Ordering::Relaxed)
+    }
+}
+
+impl Default for RouteLatencyStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// 会话粘性映射条目。
+///
+/// 记录某会话上次选中的候选索引，用于重试/多轮对话时路由到同一上游。
+#[derive(Debug, Clone)]
+pub struct StickyEntry {
+    /// 选中的候选索引
+    pub candidate_index: usize,
+    /// 路由标识（model|provider_id|upstream_model）用于校验配置未变
+    pub route_key: String,
+    /// 创建时间
+    pub created_at: Instant,
+}
+
+/// 全局共享状态。
+///
+/// 在各请求处理函数间共享，包含配置、指标、熔断器、HTTP 客户端
+/// 以及负载均衡运行时统计（延迟/计数/粘性/在途）。
 pub struct AppState {
     pub config: Arc<RwLock<AppConfig>>,
     pub config_path: PathBuf,
@@ -235,6 +304,15 @@ pub struct AppState {
     pub sink: Mutex<Option<Arc<dyn EventSink>>>,
     /// SQLite 数据存储（可选；测试时可为 None）
     pub db: Mutex<Option<Arc<Database>>>,
+    // ── 负载均衡运行时统计 ──
+    /// 路由延迟统计：key = `{model}|{provider_id}|{upstream_model}`
+    pub route_latency: DashMap<String, RouteLatencyStats>,
+    /// 轮询计数器：key = `{model}` → AtomicU64
+    pub lb_counters: DashMap<String, AtomicU64>,
+    /// 会话粘性映射：key = session_key → StickyEntry
+    pub sticky_sessions: DashMap<String, StickyEntry>,
+    /// 在途请求计数：key = `{model}|{provider_id}|{upstream_model}`
+    pub in_flight: DashMap<String, AtomicU64>,
 }
 
 impl AppState {
@@ -252,6 +330,10 @@ impl AppState {
             started_at: std::time::Instant::now(),
             sink: Mutex::new(None),
             db: Mutex::new(None),
+            route_latency: DashMap::new(),
+            lb_counters: DashMap::new(),
+            sticky_sessions: DashMap::new(),
+            in_flight: DashMap::new(),
         }
     }
 

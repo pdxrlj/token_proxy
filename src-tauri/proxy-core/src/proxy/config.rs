@@ -1,5 +1,97 @@
 use serde::{Deserialize, Serialize};
 
+// ─────────────────────────── 负载均衡配置 ───────────────────────────
+
+/// 负载均衡策略。
+///
+/// 决定当同一模型存在多个上游候选时如何选择。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LbStrategy {
+    /// 轮询（默认）：按顺序循环分配
+    RoundRobin,
+    /// 按响应速度选择：EWMA 延迟最低优先
+    FastestResponse,
+    /// 加权随机：按 `route.weight` 比例分配
+    Weighted,
+    /// 均匀随机
+    Random,
+    /// 最少在途连接数：选当前并发请求最少的候选
+    LeastConnections,
+}
+
+impl Default for LbStrategy {
+    fn default() -> Self {
+        Self::RoundRobin
+    }
+}
+
+/// 会话标识来源（用于粘性路由，确保重试命中同一上游）。
+///
+/// 采用内部标签序列化：`{"type": "header", "value": "x-session-id"}`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+pub enum SessionKeySource {
+    /// 从 HTTP header 取值，如 "x-session-id"
+    Header(String),
+    /// 从请求 body 字段取值，如 "session_id" / "user"
+    BodyField(String),
+    /// 用第一条 role=user 消息的内容哈希
+    FirstUserMessage,
+    /// 用全部 messages 的内容哈希
+    MessagesHash,
+}
+
+impl Default for SessionKeySource {
+    fn default() -> Self {
+        Self::FirstUserMessage
+    }
+}
+
+/// 会话粘性配置。
+///
+/// 启用后，同一会话的请求始终路由到首次选中的上游，
+/// 避免重试/多轮对话时上下文丢失或上游缓存失效。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StickyConfig {
+    pub enabled: bool,
+    pub session_key_source: SessionKeySource,
+    /// 粘性 TTL（秒）；超时后重新选择上游
+    pub ttl_secs: u64,
+}
+
+impl Default for StickyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            session_key_source: SessionKeySource::FirstUserMessage,
+            ttl_secs: 1800,
+        }
+    }
+}
+
+/// 负载均衡配置。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LoadBalanceConfig {
+    pub enabled: bool,
+    pub strategy: LbStrategy,
+    pub sticky: StickyConfig,
+}
+
+impl Default for LoadBalanceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            strategy: LbStrategy::RoundRobin,
+            sticky: StickyConfig::default(),
+        }
+    }
+}
+
+// ─────────────────────────── 顶层配置 ───────────────────────────
+
 /// 顶层应用配置。存为 JSON，GUI 编辑后写回并热重载。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -8,6 +100,8 @@ pub struct AppConfig {
     pub retry: RetryConfig,
     pub providers: Vec<ProviderConfig>,
     pub routes: Vec<RouteConfig>,
+    #[serde(default)]
+    pub load_balance: LoadBalanceConfig,
 }
 
 impl Default for AppConfig {
@@ -17,9 +111,12 @@ impl Default for AppConfig {
             retry: RetryConfig::default(),
             providers: vec![ProviderConfig::demo()],
             routes: vec![],
+            load_balance: LoadBalanceConfig::default(),
         }
     }
 }
+
+// ─────────────────────────── 服务端配置 ───────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
@@ -38,6 +135,8 @@ impl Default for ServerConfig {
         }
     }
 }
+
+// ─────────────────────────── 重试与熔断配置 ───────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetryConfig {
@@ -65,12 +164,18 @@ impl Default for RetryConfig {
     }
 }
 
+/// 熔断器配置。
+///
+/// 熔断器像一个电路保险丝：当某个上游连续失败达到 `failure_threshold` 次后，
+/// 自动“跳闸”进入 Open 状态，暂停对该上游的请求；经过 `cooldown_secs` 秒冷却后
+/// 进入 HalfOpen 半开状态，放行一个试探请求——成功则恢复正常（Closed），
+/// 失败则重新跳闸。这样可以快速隔离故障上游，避免持续向故障服务发送请求。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CircuitBreakerConfig {
     pub enabled: bool,
-    /// 连续失败达到该次数后熔断
+    /// 连续失败达到该次数后熔断（跳闸），暂停对该上游的请求
     pub failure_threshold: u32,
-    /// 熔断冷却时间（秒）
+    /// 熔断冷却时间（秒）；冷却后进入半开状态，放行一个试探请求
     pub cooldown_secs: u64,
 }
 
@@ -83,6 +188,8 @@ impl Default for CircuitBreakerConfig {
         }
     }
 }
+
+// ─────────────────────────── Provider 配置 ───────────────────────────
 
 /// 上游模型服务商
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,7 +230,12 @@ impl ProviderConfig {
     }
 }
 
-/// 模型 → 上游的路由规则
+// ─────────────────────────── 路由配置 ───────────────────────────
+
+/// 模型 → 上游的路由规则。
+///
+/// 同一 `model` 可配置多条路由（指向不同 provider 或不同 upstream_model），
+/// 由负载均衡器在它们之间分配请求。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteConfig {
     pub model: String,
@@ -134,6 +246,16 @@ pub struct RouteConfig {
     /// 参数改写（可选）：temperature / max_tokens 等，合并进请求体
     #[serde(default)]
     pub overrides: serde_json::Map<String, serde_json::Value>,
+    /// 负载均衡权重（strategy = Weighted 时生效，默认 1）
+    #[serde(default = "default_weight")]
+    pub weight: u32,
+    /// 是否禁用此路由参与负载均衡（设为 true 则仅作为 fallback）
+    #[serde(default)]
+    pub disabled: bool,
+}
+
+fn default_weight() -> u32 {
+    1
 }
 
 impl Default for RouteConfig {
@@ -143,27 +265,77 @@ impl Default for RouteConfig {
             provider: String::new(),
             upstream_model: String::new(),
             overrides: serde_json::Map::new(),
+            weight: 1,
+            disabled: false,
         }
     }
 }
 
+// ─────────────────────────── 候选路由解析 ───────────────────────────
+
+/// 一个候选路由（provider + 可选 route），用于负载均衡选择。
+#[derive(Debug, Clone)]
+pub struct Candidate<'a> {
+    pub provider: &'a ProviderConfig,
+    pub route: Option<&'a RouteConfig>,
+    /// 在候选列表中的索引（用于 sticky 记录）
+    pub index: usize,
+}
+
 impl AppConfig {
-    /// 找到一个模型对应的 Provider（先精确路由，再扫 Provider 模型表）
-    pub fn resolve_provider(&self, model: &str) -> Option<(&ProviderConfig, Option<&RouteConfig>)> {
-        if let Some(route) = self.routes.iter().find(|r| r.model == model) {
+    /// 返回模型对应的所有候选路由（用于负载均衡）。
+    ///
+    /// # 解析顺序
+    /// 1. **精确路由匹配**：收集 `routes` 中 `model` 精确匹配的条目（排除 `disabled`）
+    /// 2. **隐式候选回退**：若无精确路由命中，扫描 `providers[].models` 作为隐式候选
+    ///
+    /// # 返回
+    /// 候选列表（可能为空）。同一模型可有多条路由，形成负载均衡候选集。
+    pub fn resolve_candidates(&self, model: &str) -> Vec<Candidate<'_>> {
+        let mut result = Vec::new();
+
+        // 精确路由匹配
+        for (i, route) in self.routes.iter().enumerate() {
+            if route.model != model || route.disabled {
+                continue;
+            }
             if let Some(p) = self
                 .providers
                 .iter()
                 .find(|p| p.id == route.provider && p.enabled)
             {
-                return Some((p, Some(route)));
+                result.push(Candidate {
+                    provider: p,
+                    route: Some(route),
+                    index: i,
+                });
             }
         }
-        self.providers
-            .iter()
-            .filter(|p| p.enabled)
-            .find(|p| p.models.iter().any(|m| m == model))
-            .map(|p| (p, None))
+
+        // 若无精确路由，扫描 provider 模型表
+        if result.is_empty() {
+            for p in self.providers.iter().filter(|p| p.enabled) {
+                if p.models.iter().any(|m| m == model) {
+                    result.push(Candidate {
+                        provider: p,
+                        route: None,
+                        index: result.len(),
+                    });
+                }
+            }
+        }
+
+        result
+    }
+
+    /// 找到一个模型对应的 Provider（先精确路由，再扫 Provider 模型表）。
+    ///
+    /// 向后兼容方法：返回首个候选。新代码应优先使用 [`resolve_candidates`]。
+    pub fn resolve_provider(&self, model: &str) -> Option<(&ProviderConfig, Option<&RouteConfig>)> {
+        self.resolve_candidates(model)
+            .into_iter()
+            .next()
+            .map(|c| (c.provider, c.route))
     }
 }
 
@@ -191,6 +363,8 @@ mod tests {
                 provider: "b".into(),
                 upstream_model: String::new(),
                 overrides: serde_json::Map::new(),
+                weight: 1,
+                disabled: false,
             }],
             ..AppConfig::default()
         };
@@ -204,6 +378,96 @@ mod tests {
         assert!(r2.is_none());
 
         assert!(cfg.resolve_provider("nope").is_none());
+    }
+
+    #[test]
+    fn resolve_candidates_multiple_routes() {
+        let cfg = AppConfig {
+            providers: vec![
+                ProviderConfig {
+                    id: "zhipu-a".into(),
+                    name: "智谱A".into(),
+                    ..ProviderConfig::demo()
+                },
+                ProviderConfig {
+                    id: "zhipu-b".into(),
+                    name: "智谱B".into(),
+                    ..ProviderConfig::demo()
+                },
+                ProviderConfig {
+                    id: "siliconflow".into(),
+                    name: "硅基流动".into(),
+                    ..ProviderConfig::demo()
+                },
+            ],
+            routes: vec![
+                RouteConfig {
+                    model: "glm-5.2".into(),
+                    provider: "zhipu-a".into(),
+                    upstream_model: "glm-4-plus".into(),
+                    ..Default::default()
+                },
+                RouteConfig {
+                    model: "glm-5.2".into(),
+                    provider: "zhipu-b".into(),
+                    upstream_model: "glm-4-plus".into(),
+                    ..Default::default()
+                },
+                RouteConfig {
+                    model: "glm-5.2".into(),
+                    provider: "siliconflow".into(),
+                    upstream_model: "zhipuai/glm-4-plus".into(),
+                    ..Default::default()
+                },
+            ],
+            ..AppConfig::default()
+        };
+
+        let candidates = cfg.resolve_candidates("glm-5.2");
+        assert_eq!(candidates.len(), 3);
+        assert_eq!(candidates[0].provider.id, "zhipu-a");
+        assert_eq!(candidates[1].provider.id, "zhipu-b");
+        assert_eq!(candidates[2].provider.id, "siliconflow");
+        // upstream_model 各不同
+        assert_eq!(
+            candidates[2].route.unwrap().upstream_model,
+            "zhipuai/glm-4-plus"
+        );
+    }
+
+    #[test]
+    fn resolve_candidates_skips_disabled() {
+        let cfg = AppConfig {
+            providers: vec![
+                ProviderConfig {
+                    id: "a".into(),
+                    ..ProviderConfig::demo()
+                },
+                ProviderConfig {
+                    id: "b".into(),
+                    ..ProviderConfig::demo()
+                },
+            ],
+            routes: vec![
+                RouteConfig {
+                    model: "m1".into(),
+                    provider: "a".into(),
+                    disabled: false,
+                    ..Default::default()
+                },
+                RouteConfig {
+                    model: "m1".into(),
+                    provider: "b".into(),
+                    disabled: true, // 被禁用
+                    ..Default::default()
+                },
+            ],
+            ..AppConfig::default()
+        };
+
+        let candidates = cfg.resolve_candidates("m1");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].provider.id, "a");
     }
 
     #[test]

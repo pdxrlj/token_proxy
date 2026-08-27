@@ -12,10 +12,13 @@ export function Routes({ data }: { data: AppData }) {
     provider: config.providers[0]?.id ?? "",
     upstream_model: "",
     overrides: {},
+    weight: 1,
+    disabled: false,
   });
   const [adding, setAdding] = useState(false);
   const [overridesJson, setOverridesJson] = useState("{}");
   const [editingOverrides, setEditingOverrides] = useState<RouteConfig | null>(null);
+  const [editingOverridesIdx, setEditingOverridesIdx] = useState<number>(-1);
   // 行内编辑上游模型名的本地草稿（key=route.model），失焦时提交，避免每次按键写文件
   const [draftUpstream, setDraftUpstream] = useState<Record<string, string>>({});
 
@@ -31,38 +34,51 @@ export function Routes({ data }: { data: AppData }) {
       toast("请选择上游 Provider", "err");
       return;
     }
-    if (config.routes.some((r) => r.model === model)) {
-      toast(`模型「${model}」已有路由`, "err");
-      return;
-    }
     await save({ ...config, routes: [...config.routes, newRoute] });
     setAdding(false);
-    setNewRoute({ model: "", provider: config.providers[0]?.id ?? "", upstream_model: "", overrides: {} });
+    setNewRoute({ model: "", provider: config.providers[0]?.id ?? "", upstream_model: "", overrides: {}, weight: 1, disabled: false });
     toast(`已添加路由 ${model} → ${newRoute.provider}`);
   };
 
-  const changeProvider = async (model: string, provider: string) => {
+  const changeProvider = async (idx: number, provider: string) => {
     await save({
       ...config,
-      routes: config.routes.map((r) => (r.model === model ? { ...r, provider } : r)),
+      routes: config.routes.map((r, i) => (i === idx ? { ...r, provider } : r)),
     });
   };
 
-  const changeUpstreamModel = async (model: string, upstreamModel: string) => {
+  const changeUpstreamModel = async (idx: number, upstreamModel: string) => {
     const trimmed = upstreamModel.trim();
-    // 值未变则不写
-    const current = config.routes.find((r) => r.model === model)?.upstream_model ?? "";
+    const current = config.routes[idx]?.upstream_model ?? "";
     if (trimmed === current) return;
     await save({
       ...config,
-      routes: config.routes.map((r) =>
-        r.model === model ? { ...r, upstream_model: trimmed } : r,
+      routes: config.routes.map((r, i) =>
+        i === idx ? { ...r, upstream_model: trimmed } : r,
       ),
     });
   };
 
-  const removeRoute = async (model: string) => {
-    await save({ ...config, routes: config.routes.filter((r) => r.model !== model) });
+  const changeWeight = async (idx: number, weight: number) => {
+    await save({
+      ...config,
+      routes: config.routes.map((r, i) =>
+        i === idx ? { ...r, weight: Math.max(1, weight) } : r,
+      ),
+    });
+  };
+
+  const toggleDisabled = async (idx: number) => {
+    await save({
+      ...config,
+      routes: config.routes.map((r, i) =>
+        i === idx ? { ...r, disabled: !r.disabled } : r,
+      ),
+    });
+  };
+
+  const removeRoute = async (idx: number) => {
+    await save({ ...config, routes: config.routes.filter((_, i) => i !== idx) });
     toast("已删除路由");
   };
 
@@ -77,8 +93,8 @@ export function Routes({ data }: { data: AppData }) {
     }
     await save({
       ...config,
-      routes: config.routes.map((r) =>
-        r.model === editingOverrides.model ? { ...r, overrides: parsed } : r,
+      routes: config.routes.map((r, i) =>
+        i === editingOverridesIdx ? { ...r, overrides: parsed } : r,
       ),
     });
     setEditingOverrides(null);
@@ -108,7 +124,7 @@ export function Routes({ data }: { data: AppData }) {
         <div className="card">
           <div className="empty">
             <Waypoints size={30} />
-            <div>还没有路由规则。模型请求会按 Provider 列表自动匹配；添加路由可精确控制转发与参数改写。</div>
+            <div>还没有路由规则。模型请求会按 Provider 列表自动匹配；添加路由可精确控制转发与参数改写。同名模型多条路由可启用负载均衡。</div>
           </div>
         </div>
       ) : (
@@ -116,16 +132,18 @@ export function Routes({ data }: { data: AppData }) {
           <table className="table">
             <thead>
               <tr>
-                <th style={{ width: "24%" }}>模型名</th>
-                <th style={{ width: "24%" }}>上游模型名</th>
-                <th style={{ width: "22%" }}>上游 Provider</th>
+                <th style={{ width: "18%" }}>模型名</th>
+                <th style={{ width: "18%" }}>上游模型名</th>
+                <th style={{ width: "16%" }}>上游 Provider</th>
+                <th style={{ width: 70 }}>权重</th>
                 <th>参数改写</th>
-                <th style={{ width: 120 }}></th>
+                <th style={{ width: 50 }}>启用</th>
+                <th style={{ width: 80 }}></th>
               </tr>
             </thead>
             <tbody>
-              {config.routes.map((r) => (
-                <tr key={r.model}>
+              {config.routes.map((r, idx) => (
+                <tr key={idx} style={r.disabled ? { opacity: 0.5 } : undefined}>
                   <td>
                     <span className="mono" style={{ fontWeight: 600, color: "var(--text-1)" }}>{r.model}</span>
                   </td>
@@ -133,15 +151,15 @@ export function Routes({ data }: { data: AppData }) {
                     <input
                       className="input mono"
                       style={{ width: "100%" }}
-                      value={draftUpstream[r.model] ?? r.upstream_model ?? ""}
+                      value={draftUpstream[idx] ?? r.upstream_model ?? ""}
                       placeholder={r.model}
                       onChange={(e) =>
-                        setDraftUpstream((d) => ({ ...d, [r.model]: e.target.value }))
+                        setDraftUpstream((d) => ({ ...d, [idx]: e.target.value }))
                       }
                       onBlur={(e) => {
-                        changeUpstreamModel(r.model, e.target.value);
+                        changeUpstreamModel(idx, e.target.value);
                         setDraftUpstream((d) => {
-                          const { [r.model]: _, ...rest } = d;
+                          const { [idx]: _, ...rest } = d;
                           return rest;
                         });
                       }}
@@ -151,9 +169,9 @@ export function Routes({ data }: { data: AppData }) {
                   <td>
                     <select
                       className="select mono"
-                      style={{ width: "auto", minWidth: 160 }}
+                      style={{ width: "auto", minWidth: 140 }}
                       value={r.provider}
-                      onChange={(e) => changeProvider(r.model, e.target.value)}
+                      onChange={(e) => changeProvider(idx, e.target.value)}
                     >
                       {config.providers.map((p) => (
                         <option key={p.id} value={p.id} disabled={!p.enabled}>
@@ -163,10 +181,22 @@ export function Routes({ data }: { data: AppData }) {
                     </select>
                   </td>
                   <td>
+                    <input
+                      className="input mono"
+                      type="number"
+                      min={1}
+                      style={{ width: 60 }}
+                      value={r.weight ?? 1}
+                      onChange={(e) => changeWeight(idx, parseInt(e.target.value) || 1)}
+                      title="负载均衡权重（weighted 策略时生效）"
+                    />
+                  </td>
+                  <td>
                     <button
                       className="btn ghost sm"
                       onClick={() => {
                         setEditingOverrides(r);
+                        setEditingOverridesIdx(idx);
                         setOverridesJson(JSON.stringify(r.overrides, null, 2));
                       }}
                       title="编辑参数改写（temperature 等）"
@@ -175,8 +205,16 @@ export function Routes({ data }: { data: AppData }) {
                       {overridesSummary(r.overrides)}
                     </button>
                   </td>
+                  <td style={{ textAlign: "center" }}>
+                    <input
+                      type="checkbox"
+                      checked={!r.disabled}
+                      onChange={() => toggleDisabled(idx)}
+                      title={r.disabled ? "已禁用" : "已启用"}
+                    />
+                  </td>
                   <td style={{ textAlign: "right" }}>
-                    <Button size="sm" variant="danger" onClick={() => removeRoute(r.model)}>
+                    <Button size="sm" variant="danger" onClick={() => removeRoute(idx)}>
                       <Trash2 size={13} />
                     </Button>
                   </td>
@@ -219,6 +257,16 @@ export function Routes({ data }: { data: AppData }) {
                 </option>
               ))}
             </select>
+          </Field>
+          <Field label="权重" help="负载均衡加权策略（weighted）时生效，默认 1">
+            <input
+              className="input mono"
+              type="number"
+              min={1}
+              style={{ width: 100 }}
+              value={newRoute.weight ?? 1}
+              onChange={(e) => setNewRoute({ ...newRoute, weight: parseInt(e.target.value) || 1 })}
+            />
           </Field>
           <div className="form-actions">
             <Button variant="ghost" onClick={() => setAdding(false)}>取消</Button>

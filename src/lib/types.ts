@@ -1,10 +1,18 @@
-// 与 Rust 侧 serde 结构对应的类型定义
+/**
+ * 与 Rust 侧 serde 结构对应的类型定义。
+ *
+ * 注意：所有字段名使用 snake_case，与 Rust 序列化保持一致。
+ */
+
+// ─────────────────────────── 服务端配置 ───────────────────────────
 
 export interface ServerConfig {
   host: string;
   port: number;
   local_api_key: string;
 }
+
+// ─────────────────────────── 重试与熔断配置 ───────────────────────────
 
 export interface CircuitBreakerConfig {
   enabled: boolean;
@@ -21,6 +29,8 @@ export interface RetryConfig {
   circuit_breaker: CircuitBreakerConfig;
 }
 
+// ─────────────────────────── Provider 配置 ───────────────────────────
+
 export interface ProviderConfig {
   id: string;
   name: string;
@@ -31,19 +41,68 @@ export interface ProviderConfig {
   models: string[];
 }
 
+// ─────────────────────────── 路由配置 ───────────────────────────
+
+/**
+ * 模型 → 上游的路由规则。
+ * 同一 model 可配置多条路由，由负载均衡器在它们之间分配请求。
+ */
 export interface RouteConfig {
   model: string;
   provider: string;
   /** 转发到上游时使用的模型名；为空则不改写，沿用客户端请求的 model */
   upstream_model?: string;
   overrides: Record<string, unknown>;
+  /** 负载均衡权重（strategy = weighted 时生效，默认 1） */
+  weight?: number;
+  /** 是否禁用此路由参与负载均衡（设为 true 则不参与） */
+  disabled?: boolean;
 }
 
+// ─────────────────────────── 负载均衡配置 ───────────────────────────
+
+/** 负载均衡策略 */
+export type LbStrategy =
+  | "round_robin"
+  | "fastest_response"
+  | "weighted"
+  | "random"
+  | "least_connections";
+
+/** 会话标识来源（用于粘性路由，确保重试命中同一上游） */
+export type SessionKeySource =
+  | { type: "header"; value: string }
+  | { type: "body_field"; value: string }
+  | { type: "first_user_message" }
+  | { type: "messages_hash" };
+
+/**
+ * 会话粘性配置。
+ * 启用后，同一会话的请求始终路由到首次选中的上游。
+ */
+export interface StickyConfig {
+  enabled: boolean;
+  session_key_source: SessionKeySource;
+  /** 粘性 TTL（秒）；超时后重新选择上游 */
+  ttl_secs: number;
+}
+
+/** 负载均衡配置 */
+export interface LoadBalanceConfig {
+  enabled: boolean;
+  strategy: LbStrategy;
+  sticky: StickyConfig;
+}
+
+// ─────────────────────────── 顶层配置 ───────────────────────────
+
+/** 顶层应用配置，存为 JSON，GUI 编辑后写回并热重载 */
 export interface AppConfig {
   server: ServerConfig;
   retry: RetryConfig;
   providers: ProviderConfig[];
   routes: RouteConfig[];
+  load_balance: LoadBalanceConfig;
 }
 
 export interface RequestLog {
@@ -119,6 +178,15 @@ export const DEFAULT_CONFIG: AppConfig = {
   },
   providers: [],
   routes: [],
+  load_balance: {
+    enabled: false,
+    strategy: "round_robin",
+    sticky: {
+      enabled: true,
+      session_key_source: { type: "first_user_message" },
+      ttl_secs: 1800,
+    },
+  },
 };
 
 /** 数据存储记录（对应 Rust DatasetRecord） */

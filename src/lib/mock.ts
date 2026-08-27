@@ -103,20 +103,35 @@ export const MOCK_CONFIG: AppConfig = {
       provider: "openai",
       upstream_model: "",
       overrides: { temperature: 0.7 },
+      weight: 1,
+      disabled: false,
     },
     {
       model: "deepseek-chat",
       provider: "deepseek",
       upstream_model: "",
       overrides: {},
+      weight: 1,
+      disabled: false,
     },
     {
       model: "claude-sonnet-4",
       provider: "anthropic",
       upstream_model: "",
       overrides: {},
+      weight: 1,
+      disabled: false,
     },
   ],
+  load_balance: {
+    enabled: false,
+    strategy: "round_robin",
+    sticky: {
+      enabled: true,
+      session_key_source: { type: "first_user_message" },
+      ttl_secs: 1800,
+    },
+  },
 };
 
 export function mockStatus(): StatusDto {
