@@ -10,6 +10,18 @@ export interface ServerConfig {
   host: string;
   port: number;
   local_api_key: string;
+  /** 强制要求请求携带已配置的 API Key（开启后配额才无法绕过） */
+  require_api_key?: boolean;
+}
+
+/** 用户（每人持有一个 API Key，可选携带；用于配额限制） */
+export interface UserConfig {
+  id: string;
+  name: string;
+  key: string;
+  enabled: boolean;
+  /** 最大请求数；null / undefined 表示不限制 */
+  max_requests?: number | null;
 }
 
 // ─────────────────────────── 重试与熔断配置 ───────────────────────────
@@ -103,6 +115,44 @@ export interface AppConfig {
   providers: ProviderConfig[];
   routes: RouteConfig[];
   load_balance: LoadBalanceConfig;
+  users?: UserConfig[];
+}
+
+/** 错误大类：决定详情面板的标题与配色 */
+export type ErrorKind =
+  | "upstream"
+  | "circuit_open"
+  | "network"
+  | "timeout"
+  | "route_not_found"
+  | "bad_request"
+  | "unauthorized"
+  | "internal";
+
+/** 结构化错误详情：后端在出错时收集的诊断信息 */
+export interface ErrorDetail {
+  kind: ErrorKind;
+  /** 一句话摘要：发生了什么 */
+  summary: string;
+  /** 上游/系统返回的原始错误详情 */
+  detail?: string | null;
+  /** 面向用户的排查建议 */
+  hint?: string | null;
+  provider?: string | null;
+  provider_id?: string | null;
+  upstream_model?: string | null;
+  endpoint?: string | null;
+  /** 上游返回的 HTTP 状态码 */
+  upstream_status?: number | null;
+  /** 已尝试的候选数 */
+  candidates_tried?: number | null;
+  total_candidates?: number | null;
+  /** 重试次数 */
+  retries?: number | null;
+  /** 连续失败次数 */
+  consecutive_failures?: number | null;
+  /** 熔断冷却剩余秒数；0 表示可立即重试 */
+  cooldown_remaining_secs?: number | null;
 }
 
 export interface RequestLog {
@@ -117,6 +167,8 @@ export interface RequestLog {
   latency_ms: number;
   stream: boolean;
   error: string | null;
+  /** 结构化错误详情（成功请求为 undefined） */
+  error_detail?: ErrorDetail | null;
   tokens_in: number | null;
   tokens_out: number | null;
   response_bytes?: number | null;
@@ -151,6 +203,8 @@ export interface StatusDto {
   providers: number;
   routes: number;
   total_requests: number;
+  /** 服务启动失败原因（如端口被占用）；正常运行时为 null */
+  server_error?: string | null;
 }
 
 export type BreakerStateName = "closed" | "open" | "half_open";
@@ -163,7 +217,12 @@ export interface BreakerStatus {
 export type BreakerMap = Record<string, BreakerStatus>;
 
 export const DEFAULT_CONFIG: AppConfig = {
-  server: { host: "127.0.0.1", port: 8787, local_api_key: "" },
+  server: {
+    host: "127.0.0.1",
+    port: 8787,
+    local_api_key: "",
+    require_api_key: false,
+  },
   retry: {
     max_retries: 3,
     base_delay_ms: 500,
@@ -178,6 +237,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   },
   providers: [],
   routes: [],
+  users: [],
   load_balance: {
     enabled: false,
     strategy: "round_robin",

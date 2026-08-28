@@ -31,38 +31,133 @@ fn reload(state: &Arc<AppState>) -> Result<(), String> {
     Ok(())
 }
 
+/// 配置变更后同步服务监听：仅当 host/port 变化时重启监听，
+/// 其余配置由 AppState 中的 RwLock 热生效。
+async fn sync_server(state: &Arc<AppState>) {
+    match token_proxy_core::proxy::apply_server_config(state).await {
+        Ok(true) => tracing::info!("proxy server restarted on new listen address"),
+        Ok(false) => {}
+        Err(e) => tracing::error!("failed to restart proxy server: {e}"),
+    }
+}
+
 #[tauri::command]
 fn get_config(state: tauri::State<Arc<AppState>>) -> Result<AppConfig, String> {
     Ok(state.config.read().clone())
 }
 
 #[tauri::command]
-fn save_config(state: tauri::State<Arc<AppState>>, cfg: AppConfig) -> Result<(), String> {
+async fn save_config(
+    state: tauri::State<'_, Arc<AppState>>,
+    cfg: AppConfig,
+) -> Result<(), String> {
     validate(&cfg)?;
     let path = state.config_path.clone();
     persist_config(&path, &cfg)?;
     *state.config.write() = cfg;
+    // 监听地址（host/port）变化时重启监听，其余配置热生效
+    let s = state.inner().clone();
+    sync_server(&s).await;
     Ok(())
 }
 
+/// 导出当前完整配置为 JSON 字符串（含 API Key）。
+///
+/// 由前端负责落盘（浏览器下载），避免引入文件对话框插件依赖。
 #[tauri::command]
-fn reload_config(state: tauri::State<Arc<AppState>>) -> Result<AppConfig, String> {
+fn export_config(state: tauri::State<Arc<AppState>>) -> Result<String, String> {
+    let cfg = state.config.read().clone();
+    serde_json::to_string_pretty(&cfg).map_err(|e| format!("序列化配置失败：{e}"))
+}
+
+/// 导入配置：校验 → 写盘 → 热生效（含按需重启监听）。
+///
+/// 会整体替换当前配置，因此导入前前端需二次确认。
+#[tauri::command]
+async fn import_config(
+    state: tauri::State<'_, Arc<AppState>>,
+    json: String,
+) -> Result<AppConfig, String> {
+    let cfg: AppConfig =
+        serde_json::from_str(&json).map_err(|e| format!("配置文件格式不正确：{e}"))?;
+    // 基本结构校验：确保是本项目导出的配置而非任意 JSON
+    if cfg.server.host.trim().is_empty() {
+        return Err("配置内容不完整：缺少 server.host 字段".into());
+    }
+    validate(&cfg)?;
+
+    let path = state.config_path.clone();
+    persist_config(&path, &cfg)?;
+    *state.config.write() = cfg;
+
+    let s = state.inner().clone();
+    sync_server(&s).await;
+
+    Ok(state.config.read().clone())
+}
+
+/// 重置用户的已用请求数（传 null 表示重置全部）
+#[tauri::command]
+fn reset_user_usage(
+    state: tauri::State<Arc<AppState>>,
+    id: Option<String>,
+) -> Result<(), String> {
+    state.reset_user_usage(id.as_deref());
+    Ok(())
+}
+
+/// 各用户的已用请求数快照：`{ id: 已用次数 }`
+#[tauri::command]
+fn get_user_usage(
+    state: tauri::State<Arc<AppState>>,
+) -> Result<std::collections::HashMap<String, u64>, String> {
+    let mut map = std::collections::HashMap::new();
+    for entry in state.user_usage.iter() {
+        map.insert(entry.key().clone(), entry.value().load(std::sync::atomic::Ordering::Relaxed));
+    }
+    Ok(map)
+}
+
+#[tauri::command]
+async fn reload_config(
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<AppConfig, String> {
     reload(&state)?;
+    let s = state.inner().clone();
+    sync_server(&s).await;
     Ok(state.config.read().clone())
 }
 
 #[tauri::command]
-fn get_status(state: tauri::State<Arc<AppState>>) -> Result<StatusDto, String> {
-    let cfg = state.config.read();
+async fn get_status(
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<StatusDto, String> {
+    let (host, port, providers, routes) = {
+        let cfg = state.config.read();
+        (
+            cfg.server.host.clone(),
+            cfg.server.port,
+            cfg.providers.len(),
+            cfg.routes.len(),
+        )
+    };
+    // 服务实际监听的端口（端口为 0 时为内核分配的真实端口）
+    let port = state
+        .server
+        .bound_addr()
+        .await
+        .map(|a| a.port())
+        .unwrap_or(port);
     Ok(StatusDto {
-        running: true,
-        host: cfg.server.host.clone(),
-        port: cfg.server.port,
+        running: state.server.is_running().await,
+        host,
+        port,
         config_path: state.config_path.display().to_string(),
         uptime_secs: state.started_at.elapsed().as_secs(),
-        providers: cfg.providers.len(),
-        routes: cfg.routes.len(),
+        providers,
+        routes,
         total_requests: state.metrics.snapshot().total,
+        server_error: state.server.last_error().await,
     })
 }
 
@@ -194,11 +289,11 @@ pub fn run() {
 
             app.manage(state.clone());
 
-            // 启动代理服务器（后台任务）
+            // 启动代理服务器（可重启，监听地址变更时自动重新绑定）
             let server_state = state.clone();
             tauri::async_runtime::spawn(async move {
-                if let Err(e) = token_proxy_core::proxy::serve(server_state).await {
-                    tracing::error!("proxy server exited: {e}");
+                if let Err(e) = server_state.server.start(server_state.clone()).await {
+                    tracing::error!("proxy server failed to start: {e}");
                 }
             });
 
@@ -218,6 +313,11 @@ pub fn run() {
                                     if let Some(s) = watch_state.sink.lock().as_ref() {
                                         s.emit_config_changed();
                                     }
+                                    // 监听地址变化时重启服务
+                                    let s = watch_state.clone();
+                                    tauri::async_runtime::spawn(async move {
+                                        sync_server(&s).await;
+                                    });
                                 }
                             }
                         }
@@ -241,6 +341,10 @@ pub fn run() {
             get_config,
             save_config,
             reload_config,
+            export_config,
+            import_config,
+            reset_user_usage,
+            get_user_usage,
             get_status,
             get_metrics,
             reset_breaker,

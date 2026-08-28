@@ -45,6 +45,7 @@ export function Overview({ data }: { data: AppData }) {
   const [detail, setDetail] = useState<RequestLog | null>(null);
 
   const endpoint = status ? `${status.host}:${status.port}` : "…";
+  const serverDown = !!status && !status.running;
   const successRate =
     metrics.total > 0 ? Math.round((metrics.success / metrics.total) * 100) : 100;
   const cacheHitRate =
@@ -103,8 +104,11 @@ export function Overview({ data }: { data: AppData }) {
           )}
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-          <span className="pill ok" style={{ fontSize: 14, padding: "8px 16px" }}>
-            <StatusDot color="cyan" />
+          <span
+            className={`pill ${serverDown ? "warn" : "ok"}`}
+            style={{ fontSize: 14, padding: "8px 16px" }}
+          >
+            <StatusDot color={serverDown ? "rose" : "cyan"} />
             <span className="mono" style={{ fontSize: 13.5 }}>
               http://{endpoint}/v1
             </span>
@@ -117,6 +121,11 @@ export function Overview({ data }: { data: AppData }) {
             任何 OpenAI 兼容客户端把 base_url 指向这里即可
           </span>
         </div>
+        {status?.server_error && (
+          <div style={{ marginTop: 12, fontSize: 12, color: "var(--rose)" }}>
+            代理未成功监听：{status.server_error}
+          </div>
+        )}
         {status && (
           <div style={{ marginTop: 12, fontSize: 11.5, color: "var(--text-3)", fontFamily: "var(--font-mono)" }}>
             配置文件：{status.config_path}

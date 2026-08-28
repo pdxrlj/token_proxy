@@ -30,6 +30,26 @@ export const api = {
     isTauri ? invoke<void>("save_config", { cfg }) : Promise.resolve(),
   reloadConfig: () =>
     isTauri ? invoke<AppConfig>("reload_config") : Promise.resolve(MOCK_CONFIG),
+  /** 导出配置为 JSON 字符串（含 API Key 等敏感信息） */
+  exportConfig: () =>
+    isTauri
+      ? invoke<string>("export_config")
+      : Promise.resolve(JSON.stringify(MOCK_CONFIG, null, 2)),
+  /** 导入配置 JSON 字符串；后端会校验格式与内容 */
+  importConfig: (json: string) =>
+    isTauri
+      ? invoke<AppConfig>("import_config", { json })
+      : Promise.resolve(MOCK_CONFIG),
+  /** 重置用户已用次数（不传 id 表示全部重置） */
+  resetUserUsage: (id?: string | null) =>
+    isTauri
+      ? invoke<void>("reset_user_usage", { id: id ?? null })
+      : Promise.resolve(),
+  /** 各用户已用次数：{ id: 次数 } */
+  getUserUsage: () =>
+    isTauri
+      ? invoke<Record<string, number>>("get_user_usage")
+      : Promise.resolve({}),
   getStatus: () =>
     isTauri ? invoke<StatusDto>("get_status") : Promise.resolve(mockStatus()),
   getMetrics: () =>

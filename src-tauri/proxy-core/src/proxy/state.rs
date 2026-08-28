@@ -1,6 +1,8 @@
 use crate::proxy::circuit::CircuitBreaker;
 use crate::proxy::config::AppConfig;
 use crate::proxy::db::Database;
+use crate::proxy::retry::ErrorDetail;
+use crate::proxy::ServerSupervisor;
 use chrono::Utc;
 use dashmap::DashMap;
 use parking_lot::{Mutex, RwLock};
@@ -27,7 +29,11 @@ pub struct RequestLog {
     pub retries: u32,
     pub latency_ms: u64,
     pub stream: bool,
+    /// 错误的简短文本（兼容旧版展示，同时用于列表页快速浏览）
     pub error: Option<String>,
+    /// 结构化错误详情（详情弹窗中分块展示；成功请求为 None）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_detail: Option<ErrorDetail>,
     pub tokens_in: Option<u64>,
     pub tokens_out: Option<u64>,
     /// 响应体大小（字节）
@@ -62,6 +68,7 @@ impl RequestLog {
             latency_ms: 0,
             stream: false,
             error: None,
+            error_detail: None,
             tokens_in: None,
             tokens_out: None,
             response_bytes: None,
@@ -239,14 +246,30 @@ pub struct RouteLatencyStats {
     ewma_ms: AtomicU64,
     /// 样本数
     samples: AtomicU64,
+    /// 最近一次采样时刻（秒级 epoch）；0 表示从未采样
+    last_sample_at: AtomicU64,
 }
+
+/// 样本有效期（秒）。超过该时长未刷新的 EWMA 视为陈旧，
+/// 不再作为 `FastestResponse` 的决策依据（避免陈旧数据长期主导选择，
+/// 同时让新加入或刚恢复的上游有机会获得流量完成冷启动）。
+pub const LATENCY_SAMPLE_TTL_SECS: u64 = 300;
 
 impl RouteLatencyStats {
     pub fn new() -> Self {
         Self {
             ewma_ms: AtomicU64::new(0),
             samples: AtomicU64::new(0),
+            last_sample_at: AtomicU64::new(0),
         }
+    }
+
+    /// 当前秒级 epoch 时间戳。
+    fn now_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
     }
 
     /// 记录一次延迟样本，更新 EWMA。alpha = 0.3（新样本权重 30%）
@@ -260,6 +283,8 @@ impl RouteLatencyStats {
         };
         self.ewma_ms.store(new, Ordering::Relaxed);
         self.samples.fetch_add(1, Ordering::Relaxed);
+        self.last_sample_at
+            .store(Self::now_secs(), Ordering::Relaxed);
     }
 
     /// 当前 EWMA 延迟（毫秒）；0 表示尚无数据
@@ -270,6 +295,18 @@ impl RouteLatencyStats {
     /// 已采集样本数
     pub fn sample_count(&self) -> u64 {
         self.samples.load(Ordering::Relaxed)
+    }
+
+    /// 样本是否新鲜（有样本且未超过 TTL）。
+    ///
+    /// 陈旧的 EWMA 不应参与 `FastestResponse` 比较：它既不反映上游
+    /// 当前状态，又会阻塞新上游的冷启动。
+    pub fn is_fresh(&self) -> bool {
+        let last = self.last_sample_at.load(Ordering::Relaxed);
+        if last == 0 {
+            return false;
+        }
+        Self::now_secs().saturating_sub(last) < LATENCY_SAMPLE_TTL_SECS
     }
 }
 
@@ -299,6 +336,8 @@ pub struct StickyEntry {
 pub struct AppState {
     pub config: Arc<RwLock<AppConfig>>,
     pub config_path: PathBuf,
+    /// 代理服务生命周期管理器（监听地址变更时重启监听）
+    pub server: Arc<ServerSupervisor>,
     pub metrics: Arc<Metrics>,
     /// 每个 Provider 一个熔断器；Arc 共享实例，避免 clone 深拷贝导致状态不同步
     pub breakers: Arc<DashMap<String, Arc<CircuitBreaker>>>,
@@ -317,6 +356,12 @@ pub struct AppState {
     pub sticky_sessions: DashMap<String, StickyEntry>,
     /// 在途请求计数：key = `{model}|{provider_id}|{upstream_model}`
     pub in_flight: DashMap<String, AtomicU64>,
+    /// 用户已用请求数：key = UserConfig.id
+    ///
+    /// 单独存放而非写入配置文件，是因为 GUI 保存配置时提交的是此前获取的快照，
+    /// 若计数存在配置里会被旧值覆盖，导致配额限制被绕过。
+    /// 代价是计数不随重启保留，可通过界面手动重置。
+    pub user_usage: DashMap<String, AtomicU64>,
 }
 
 impl AppState {
@@ -328,6 +373,7 @@ impl AppState {
         Self {
             config: Arc::new(RwLock::new(config)),
             config_path,
+            server: Arc::new(ServerSupervisor::new()),
             metrics: Arc::new(Metrics::default()),
             breakers: Arc::new(DashMap::new()),
             http,
@@ -338,7 +384,67 @@ impl AppState {
             lb_counters: DashMap::new(),
             sticky_sessions: DashMap::new(),
             in_flight: DashMap::new(),
+            user_usage: DashMap::new(),
         }
+    }
+
+    /// 读取某个用户的已用请求数
+    pub fn user_used(&self, id: &str) -> u64 {
+        self.user_usage
+            .get(id)
+            .map(|c| c.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    /// 重置某个用户的已用请求数（传 None 表示重置全部）
+    pub fn reset_user_usage(&self, id: Option<&str>) {
+        match id {
+            Some(id) => {
+                self.user_usage.remove(id);
+            }
+            None => self.user_usage.clear(),
+        }
+    }
+
+    /// 尝试为某个用户消耗一次配额。
+    ///
+    /// - `max` 为 `None`：不限次，直接累加并返回 `true`
+    /// - `max` 为 `Some(n)`：仅当已用数 < n 时原子地 +1 并返回 `true`；
+    ///   已达上限返回 `false` 且不消耗。
+    ///
+    /// 用 `fetch_update` 做原子「检查-自增」，避免并发请求同时通过校验而超额。
+    pub fn consume_user_quota(&self, id: &str, max: Option<u64>) -> bool {
+        let counter = self
+            .user_usage
+            .entry(id.to_string())
+            .or_insert_with(|| AtomicU64::new(0));
+
+        match max {
+            None => {
+                counter.fetch_add(1, Ordering::SeqCst);
+                true
+            }
+            Some(limit) => counter
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+                    if v >= limit {
+                        None
+                    } else {
+                        Some(v + 1)
+                    }
+                })
+                .is_ok(),
+        }
+    }
+
+    /// 配置中的监听地址（`host:port`）
+    pub fn configured_addr(&self) -> String {
+        let cfg = self.config.read();
+        format!("{}:{}", cfg.server.host, cfg.server.port)
+    }
+
+    /// 便捷构造：仅用于测试与独立运行（不启动 HTTP 服务）
+    pub fn with_config(config: AppConfig) -> Self {
+        Self::new(config, PathBuf::from("config.json"))
     }
 
     /// 推送日志事件（有 sink 时）
@@ -353,5 +459,113 @@ impl AppState {
         if let Some(log) = self.metrics.get_log(id) {
             self.emit_log(&log);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proxy::config::UserConfig;
+
+    fn state_with_users(users: Vec<UserConfig>) -> AppState {
+        AppState::with_config(AppConfig {
+            users,
+            ..AppConfig::default()
+        })
+    }
+
+    #[test]
+    fn unlimited_user_never_runs_out() {
+        let s = state_with_users(vec![UserConfig {
+            id: "u1".into(),
+            key: "secret".into(),
+            max_requests: None,
+            ..Default::default()
+        }]);
+        for _ in 0..1000 {
+            assert!(s.consume_user_quota("u1", None));
+        }
+        assert_eq!(s.user_used("u1"), 1000);
+    }
+
+    #[test]
+    fn quota_stops_exactly_at_limit() {
+        let s = state_with_users(vec![]);
+        // 上限 3：第 1~3 次成功，第 4 次起拒绝
+        assert!(s.consume_user_quota("u", Some(3)));
+        assert!(s.consume_user_quota("u", Some(3)));
+        assert!(s.consume_user_quota("u", Some(3)));
+        assert!(!s.consume_user_quota("u", Some(3)), "超出上限应被拒绝");
+        assert!(!s.consume_user_quota("u", Some(3)), "重复请求仍应被拒绝");
+        // 达到上限时计数不应继续增长
+        assert_eq!(s.user_used("u"), 3);
+    }
+
+    #[test]
+    fn raising_limit_releases_quota() {
+        let s = state_with_users(vec![]);
+        let _ = s.consume_user_quota("u", Some(1));
+        assert!(!s.consume_user_quota("u", Some(1)));
+        // 调高上限后应恢复可用（对应界面上调 max_requests 的场景）
+        assert!(s.consume_user_quota("u", Some(2)));
+        assert_eq!(s.user_used("u"), 2);
+    }
+
+    #[test]
+    fn reset_usage_clears_counter() {
+        let s = state_with_users(vec![]);
+        let _ = s.consume_user_quota("a", Some(1));
+        let _ = s.consume_user_quota("b", Some(1));
+
+        // 重置单个
+        s.reset_user_usage(Some("a"));
+        assert_eq!(s.user_used("a"), 0);
+        assert_eq!(s.user_used("b"), 1, "不应影响其它用户");
+        assert!(s.consume_user_quota("a", Some(1)), "重置后应可再次使用");
+
+        // 重置全部
+        s.reset_user_usage(None);
+        assert_eq!(s.user_used("a"), 0);
+        assert_eq!(s.user_used("b"), 0);
+    }
+
+    #[test]
+    fn quota_is_per_user() {
+        let s = state_with_users(vec![]);
+        let _ = s.consume_user_quota("a", Some(1));
+        assert!(!s.consume_user_quota("a", Some(1)));
+        assert!(s.consume_user_quota("b", Some(1)), "不同用户的配额相互独立");
+    }
+
+    #[test]
+    fn concurrent_consumption_never_exceeds_limit() {
+        use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+        use std::sync::Arc as StdArc;
+        use std::thread;
+
+        let s = StdArc::new(state_with_users(vec![]));
+        let limit = 50u64;
+        let granted = StdArc::new(AtomicU64::new(0));
+
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let s = s.clone();
+                let granted = granted.clone();
+                thread::spawn(move || {
+                    for _ in 0..100 {
+                        if s.consume_user_quota("u", Some(limit)) {
+                            granted.fetch_add(1, AtomicOrdering::SeqCst);
+                        }
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // 并发下批准的总数必须恰好等于上限，不能超额
+        assert_eq!(granted.load(AtomicOrdering::SeqCst), limit);
+        assert_eq!(s.user_used("u"), limit);
     }
 }

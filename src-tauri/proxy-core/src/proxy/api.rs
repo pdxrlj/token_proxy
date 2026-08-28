@@ -2,7 +2,7 @@ use crate::proxy::circuit::CircuitBreaker;
 use crate::proxy::config::{AppConfig, Candidate, ProviderConfig, RouteConfig};
 use crate::proxy::db::{build_finetune_jsonl, spawn_insert, InsertRecord};
 use crate::proxy::lb;
-use crate::proxy::retry::{backoff_delay, ProxyError};
+use crate::proxy::retry::{backoff_delay, ErrorContext, ProxyError};
 use crate::proxy::state::{AppState, RequestLog};
 use crate::proxy::upstream::{
     call_upstream, detect_cache_hit, extract_cached_tokens, forward_raw, forward_sse,
@@ -14,8 +14,16 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tracing::warn;
+
+/// 单个请求的"重试 × failover"总耗时上限（秒）。
+///
+/// 默认 `max_retries = 3` 时，最坏情况为 `候选数 × (3+1)` 次上游调用，
+/// 叠加指数退避与上游超时，总耗时可达数分钟，远超客户端超时窗口——
+/// 客户端早已断开，代理侧的重试全部白费，还会堆积占用连接与内存。
+/// 设定全局上限后，超时即快速失败，把响应时间控制在可预期的范围内。
+const TOTAL_REQUEST_TIMEOUT_SECS: u64 = 120;
 
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
@@ -72,21 +80,76 @@ async fn list_models(State(state): State<Arc<AppState>>) -> Json<serde_json::Val
     Json(serde_json::json!({ "object": "list", "data": data }))
 }
 
-fn check_auth(headers: &HeaderMap, cfg: &AppConfig) -> Result<(), ProxyError> {
-    let key = cfg.server.local_api_key.trim();
-    if key.is_empty() {
-        return Ok(());
+/// 从 Authorization 头中提取 Bearer 令牌
+fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    let auth = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok())?;
+    let token = auth.strip_prefix("Bearer ")?.trim();
+    if token.is_empty() {
+        None
+    } else {
+        Some(token)
     }
-    let auth = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    if let Some(bearer) = auth.strip_prefix("Bearer ") {
-        if bearer.trim() == key {
-            return Ok(());
+}
+
+/// 本地鉴权 + 用户配额校验。
+///
+/// # 规则
+///
+/// **严格模式**（`server.require_api_key = true`）：只接受已配置且启用用户的 API Key，
+/// 未携带或未登记的 Key 一律 401。要让配额真正生效必须开启此模式。
+///
+/// **宽松模式**（默认）：
+/// 1. 携带了 Key 且命中用户表 → 按 `max_requests` 校验并原子消耗配额，
+///    超出上限返回 429；无上限则直接放行。
+/// 2. 未命中用户表：
+///    - 设置了「本地访问令牌」→ Key 必须与之匹配，否则 401
+///    - 未设置 → 当作匿名请求放行
+///
+///    之所以放行未登记的 Key，是因为多数 OpenAI SDK 连本地代理时也会带上自己的
+///    key（如 `sk-...`），若一律拒绝会导致这些客户端全部不可用。
+///    代价是配额可被"改用随机 Key"绕过，故需要强制时请开启严格模式。
+/// 3. 未携带 Key：同 2 —— 未设置本地令牌时放行且不计配额（即"不携带 Key 不限次数"）。
+fn check_auth(state: &AppState, cfg: &AppConfig, headers: &HeaderMap) -> Result<(), ProxyError> {
+    let local_key = cfg.server.local_api_key.trim();
+    let strict = cfg.server.require_api_key;
+
+    match bearer_token(headers) {
+        None => {
+            if strict {
+                return Err(ProxyError::Unauthorized);
+            }
+            if local_key.is_empty() {
+                Ok(())
+            } else {
+                Err(ProxyError::Unauthorized)
+            }
+        }
+        Some(token) => {
+            // 命中用户表 → 走配额
+            if let Some(u) = cfg.users.iter().find(|u| u.enabled && u.key == token) {
+                if state.consume_user_quota(&u.id, u.max_requests) {
+                    return Ok(());
+                }
+                let limit = u.max_requests.unwrap_or(0);
+                let name = if u.name.trim().is_empty() {
+                    u.id.clone()
+                } else {
+                    u.name.clone()
+                };
+                return Err(ProxyError::QuotaExceeded(name, limit));
+            }
+
+            // 未命中
+            if strict {
+                return Err(ProxyError::Unauthorized);
+            }
+            if local_key.is_empty() || token == local_key {
+                Ok(())
+            } else {
+                Err(ProxyError::Unauthorized)
+            }
         }
     }
-    Err(ProxyError::Unauthorized)
 }
 
 async fn chat_completions(
@@ -112,7 +175,7 @@ async fn chat_completions(
     // 本地鉴权
     {
         let cfg = state.config.read();
-        if let Err(e) = check_auth(&headers, &cfg) {
+        if let Err(e) = check_auth(&state, &cfg, &headers) {
             return (e.http_status(), Json(e.openai_error())).into_response();
         }
     }
@@ -122,6 +185,20 @@ async fn chat_completions(
     state.emit_log(&log);
 
     let result = route_and_call(&state, &headers, "/chat/completions", &body, &mut log).await;
+
+    // route_and_call 之外的错误（如 model 缺失）在此补挂结构化详情
+    if let Err(e) = &result {
+        if log.error_detail.is_none() {
+            attach_error(
+                &mut log,
+                e,
+                ErrorContext {
+                    endpoint: Some("/chat/completions".to_string()),
+                    ..Default::default()
+                },
+            );
+        }
+    }
 
     match result {
         Ok(UpstreamOutcome::Json(v)) => {
@@ -155,7 +232,26 @@ async fn chat_completions(
             finalize_log(&state, log);
             (StatusCode::OK, Json(v)).into_response()
         }
+        // 裸 Stream 不应出现在业务层（route_and_call 总会包装成 StreamWithGuard）
         Ok(UpstreamOutcome::Stream(resp)) => {
+            forward_sse(
+                state.clone(),
+                log.provider.clone().unwrap_or_default(),
+                log.model.clone(),
+                resp,
+                log.id.clone(),
+                body.clone(),
+                log.ts,
+                log.model.clone(),
+                log.upstream_model.clone(),
+                log.provider.clone(),
+                log.tokens_in,
+                log.provider_id.clone(),
+                None,
+            )
+            .into_response()
+        }
+        Ok(UpstreamOutcome::StreamWithGuard { resp, guard }) => {
             // 流式响应：头部返回即视为成功，流内错误走 error 事件
             let provider_name = log.provider.clone().unwrap_or_default();
             let model = log.model.clone();
@@ -190,6 +286,7 @@ async fn chat_completions(
                 log_provider,
                 log_tokens_in,
                 log_provider_id,
+                Some(guard),
             )
             .into_response()
         }
@@ -232,7 +329,7 @@ async fn fallback_proxy(
     // 本地鉴权
     {
         let cfg = state.config.read();
-        if let Err(e) = check_auth(&headers, &cfg) {
+        if let Err(e) = check_auth(&state, &cfg, &headers) {
             return (e.http_status(), Json(e.openai_error())).into_response();
         }
     }
@@ -242,7 +339,23 @@ async fn fallback_proxy(
     state.metrics.record(log.clone());
     state.emit_log(&log);
 
-    match route_and_call(&state, &headers, &path, &body, &mut log).await {
+    let outcome = route_and_call(&state, &headers, &path, &body, &mut log).await;
+
+    // route_and_call 之外的错误（如 model 缺失）在此补挂结构化详情
+    if let Err(e) = &outcome {
+        if log.error_detail.is_none() {
+            attach_error(
+                &mut log,
+                e,
+                ErrorContext {
+                    endpoint: Some(format!("/v1/{path}")),
+                    ..Default::default()
+                },
+            );
+        }
+    }
+
+    match outcome {
         Ok(UpstreamOutcome::Json(v)) => {
             state.metrics.inc_total();
             state.metrics.inc_success();
@@ -270,7 +383,26 @@ async fn fallback_proxy(
             finalize_log(&state, log);
             (StatusCode::OK, Json(v)).into_response()
         }
+        // 裸 Stream 不应出现在业务层（route_and_call 总会包装成 StreamWithGuard）
         Ok(UpstreamOutcome::Stream(resp)) => {
+            forward_sse(
+                state.clone(),
+                log.provider.clone().unwrap_or_default(),
+                log.model.clone(),
+                resp,
+                log.id.clone(),
+                body.clone(),
+                log.ts,
+                log.model.clone(),
+                log.upstream_model.clone(),
+                log.provider.clone(),
+                log.tokens_in,
+                log.provider_id.clone(),
+                None,
+            )
+            .into_response()
+        }
+        Ok(UpstreamOutcome::StreamWithGuard { resp, guard }) => {
             state.metrics.inc_total();
             state.metrics.inc_success();
             state
@@ -311,9 +443,12 @@ async fn fallback_proxy(
                     log_provider,
                     log_tokens_in,
                     log_provider_id,
+                    Some(guard),
                 )
                 .into_response();
             }
+            // 非 SSE 流：响应体由 axum 直接消费，此处立即归还在途计数
+            drop(guard);
             (
                 StatusCode::OK,
                 [(header::CONTENT_TYPE, ct)],
@@ -362,7 +497,19 @@ fn resolve_routing_context(
     let cfg = state.config.read();
     let candidates = cfg.resolve_candidates(model);
     if candidates.is_empty() {
-        return Err(ProxyError::RouteNotFound(model.to_string()));
+        // 区分两种原因，让用户知道该去哪里修：
+        // - 完全没配这个模型 → 去路由页添加
+        // - 配了但渠道被禁用 → 去渠道页启用
+        let known_model = cfg.routes.iter().any(|r| r.model == model)
+            || cfg.providers.iter().any(|p| p.models.iter().any(|m| m == model));
+        let e = if known_model {
+            ProxyError::RouteNotFound(format!(
+                "{model}（已配置，但对应渠道未启用或路由被禁用）"
+            ))
+        } else {
+            ProxyError::RouteNotFound(model.to_string())
+        };
+        return Err(e);
     }
 
     let lb_cfg = cfg.load_balance.clone();
@@ -438,6 +585,23 @@ async fn route_and_call(
     let mut current_idx = selected_idx;
     let mut attempt: u32 = 0;
     let mut candidates_tried: usize = 1;
+    // 全局 deadline：限制"重试 × failover"的总耗时。
+    // 默认 max_retries=3 时，最坏情况每候选 4 次尝试 × N 个候选，
+    // 叠加指数退避可达数分钟，远超客户端超时，全部工作都会白费。
+    let deadline = Instant::now() + Duration::from_secs(TOTAL_REQUEST_TIMEOUT_SECS);
+
+    // 收集"最后一次失败"的上下文，用于出错时生成结构化错误详情。
+    // 每次进入候选时更新，因此最终保留的是失败发生的那个候选的信息。
+    let mut last_ctx: ErrorContext;
+
+    // 用闭包统一构造错误：附带上下文后返回，避免每个 return 点重复拼装。
+    let fail = |e: ProxyError,
+                ctx: &ErrorContext,
+                log: &mut RequestLog|
+     -> Result<UpstreamOutcome, ProxyError> {
+        attach_error(log, &e, ctx.clone());
+        Err(e)
+    };
 
     loop {
         let (provider, route) = &candidates[current_idx];
@@ -453,11 +617,38 @@ async fn route_and_call(
             }
         }
 
+        let upstream_model_str = route
+            .as_ref()
+            .map(|r| r.upstream_model.as_str())
+            .unwrap_or("");
+        let inflight_key = lb::route_key(model, &provider.id, upstream_model_str);
+
+        // 熔断器按 route 维度隔离（model|provider|upstream_model）：
+        // 若按 provider 共享，某个 model 的故障会连带熔断该 provider 上的
+        // 所有其它健康 model，故障域被不必要地放大。
         let breaker = state
             .breakers
-            .entry(provider.id.clone())
+            .entry(inflight_key.clone())
             .or_insert_with(|| Arc::new(CircuitBreaker::new(breaker_cfg.clone())))
             .clone();
+
+        // 更新当前候选的错误上下文（熔断状态需在此处采样）
+        let breaker_status = breaker.status();
+        last_ctx = ErrorContext {
+            provider: Some(provider.name.clone()),
+            provider_id: Some(provider.id.clone()),
+            upstream_model: if upstream_model_str.is_empty() {
+                None
+            } else {
+                Some(upstream_model_str.to_string())
+            },
+            endpoint: Some(provider.endpoint(path)),
+            candidates_tried: Some(candidates_tried),
+            total_candidates: Some(total_candidates),
+            retries: Some(attempt),
+            consecutive_failures: Some(breaker_status.consecutive_failures),
+            cooldown_remaining_secs: cooldown_remaining_secs(&breaker, &breaker_cfg),
+        };
 
         // ── 2. 熔断检查：打开时 failover 到下一候选 ──
         if breaker_cfg.enabled && breaker.before_request().is_err() {
@@ -472,28 +663,40 @@ async fn route_and_call(
                 attempt = 0;
                 continue;
             }
-            return Err(ProxyError::CircuitOpen(provider.id.clone()));
+            return fail(
+                ProxyError::CircuitOpen(provider.name.clone()),
+                &last_ctx,
+                log,
+            );
         }
 
         // ── 3. 在途计数 + 调用上游 ──
-        let upstream_model_str = route
-            .as_ref()
-            .map(|r| r.upstream_model.as_str())
-            .unwrap_or("");
-        let inflight_key = lb::route_key(model, &provider.id, upstream_model_str);
-        lb::inc_in_flight(state, &inflight_key);
+        // guard 在构造时 inc_in_flight，析构时自动归还，
+        // 保证任何提前返回路径（含 `?` 与 failover `continue`）都不会漏还。
+        let inflight_guard = lb::InFlightGuard::new(state.clone(), &inflight_key);
         let call_started = Instant::now();
 
         match call_upstream(state, provider, path, body.clone()).await {
             Ok(outcome) => {
                 // 成功：记录延迟样本，返回结果
                 breaker.on_success();
-                lb::dec_in_flight(state, &inflight_key);
-                lb::record_latency(
-                    state,
-                    &inflight_key,
-                    call_started.elapsed().as_millis() as u64,
-                );
+                let latency_ms = call_started.elapsed().as_millis() as u64;
+                lb::record_latency(state, &inflight_key, latency_ms);
+
+                if matches!(outcome, UpstreamOutcome::Stream(_)) {
+                    // 流式：计数必须持有到 SSE 流真正结束，不能在这里归还。
+                    // 把 guard 的所有权转移给调用方，由其在流结束时归还，
+                    // 否则 LeastConnections 策略下所有候选恒为 0 而失效。
+                    return Ok(UpstreamOutcome::StreamWithGuard {
+                        resp: match outcome {
+                            UpstreamOutcome::Stream(r) => r,
+                            _ => unreachable!(),
+                        },
+                        guard: inflight_guard,
+                    });
+                }
+                // 非流式：响应已完整接收，立即归还计数
+                inflight_guard.release();
                 // failover 成功后把粘性更新到实际成功的候选，
                 // 避免同会话下一个请求又撞回故障上游
                 if current_idx != selected_idx && lb_cfg.sticky.enabled {
@@ -514,7 +717,25 @@ async fn route_and_call(
                 if breaker_cfg.enabled {
                     breaker.on_failure();
                 }
-                lb::dec_in_flight(state, &inflight_key);
+                drop(inflight_guard);
+
+                // 全局 deadline 检查：退避后可能已超时，此时再重试毫无意义
+                let delay = backoff_delay(attempt + 1, &retry_cfg);
+                if Instant::now() + delay > deadline {
+                    warn!(
+                        provider = %provider.id,
+                        model = %model,
+                        error = %e,
+                        "request deadline reached, aborting retries"
+                    );
+                    // 用 Timeout 包装，让详情里能体现"总耗时超限"这一真实原因
+                    let wrapped = ProxyError::Timeout(format!(
+                        "单个请求总耗时超过 {}s 上限（已重试 {} 次，最近一次错误：{}）",
+                        TOTAL_REQUEST_TIMEOUT_SECS, attempt, e
+                    ));
+                    return fail(wrapped, &last_ctx, log);
+                }
+
                 attempt += 1;
                 state.metrics.inc_retries();
                 log.retries = attempt;
@@ -528,15 +749,15 @@ async fn route_and_call(
                     error = %e,
                     "retrying upstream call"
                 );
-                tokio::time::sleep(backoff_delay(attempt, &retry_cfg)).await;
+                tokio::time::sleep(delay).await;
             }
             Err(e) => {
                 // 不可重试或重试耗尽：failover 到下一候选
                 if breaker_cfg.enabled {
                     breaker.on_failure();
                 }
-                lb::dec_in_flight(state, &inflight_key);
-                if candidates_tried < total_candidates {
+                drop(inflight_guard);
+                if candidates_tried < total_candidates && Instant::now() < deadline {
                     warn!(
                         provider = %provider.id,
                         model = %model,
@@ -548,10 +769,50 @@ async fn route_and_call(
                     attempt = 0;
                     continue;
                 }
-                return Err(e);
+                if candidates_tried >= total_candidates {
+                    // 所有候选都试过了：把"试过几个候选"补进上下文再返回
+                    let mut ctx = last_ctx.clone();
+                    ctx.candidates_tried = Some(candidates_tried);
+                    ctx.retries = Some(attempt);
+                    return fail(e, &ctx, log);
+                }
+                // deadline 耗尽：不再 failover，直接返回最后的错误
+                warn!(
+                    provider = %provider.id,
+                    model = %model,
+                    error = %e,
+                    "request deadline reached, aborting failover"
+                );
+                return fail(
+                    ProxyError::Timeout(format!(
+                        "单个请求总耗时超过 {TOTAL_REQUEST_TIMEOUT_SECS}s 上限（已尝试 {candidates_tried}/{total_candidates} 个渠道）"
+                    )),
+                    &last_ctx,
+                    log,
+                );
             }
         }
     }
+}
+
+/// 为请求日志附加结构化错误详情。
+///
+/// 所有失败出口统一走这里，保证 `error`（简短文本）与 `error_detail`（结构化）
+/// 成对写入，前端详情弹窗才能展示完整的诊断信息。
+fn attach_error(log: &mut RequestLog, e: &ProxyError, ctx: ErrorContext) {
+    log.error = Some(e.to_string());
+    log.error_detail = Some(e.to_detail(ctx));
+}
+
+/// 采样熔断冷却剩余秒数，用于错误详情中告知用户"还需多久可恢复"。
+fn cooldown_remaining_secs(
+    breaker: &std::sync::Arc<CircuitBreaker>,
+    cfg: &crate::proxy::config::CircuitBreakerConfig,
+) -> Option<u64> {
+    if !cfg.enabled {
+        return None;
+    }
+    breaker.cooldown_remaining_secs()
 }
 
 /// 路由参数改写：`upstream_model` 覆盖 `model` 字段，`route.overrides` 覆盖其余字段。

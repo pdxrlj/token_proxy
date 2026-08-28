@@ -13,6 +13,7 @@
 use crate::proxy::config::{Candidate, LoadBalanceConfig, SessionKeySource};
 use crate::proxy::state::{AppState, StickyEntry};
 use axum::http::HeaderMap;
+use rand::Rng;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::Ordering;
@@ -97,26 +98,52 @@ fn lookup_sticky(
     lb_cfg: &LoadBalanceConfig,
     model: &str,
 ) -> Option<usize> {
-    let entry = state.sticky_sessions.get(session_key)?;
-    // 校验未过期
-    if entry.created_at.elapsed().as_secs() >= lb_cfg.sticky.ttl_secs {
+    // 先判定失效原因，再决定是否立即回收条目（避免持锁期间调用 remove 死锁）
+    enum Verdict {
+        Hit(usize),
+        Expired,
+        Stale,
+    }
+
+    let verdict = match state.sticky_sessions.get(session_key) {
+        None => return None,
+        Some(entry) => {
+            // 校验未过期
+            if entry.created_at.elapsed().as_secs() >= lb_cfg.sticky.ttl_secs {
+                Verdict::Expired
+            } else if entry.candidate_index >= candidates.len() {
+                // 校验候选索引仍有效（配置变更后候选数可能不同）
+                Verdict::Stale
+            } else {
+                // 校验路由标识未变（配置调整或请求模型不同都会导致索引指向错误路线）
+                let expected =
+                    route_key_for_candidate(model, &candidates[entry.candidate_index]);
+                if entry.route_key != expected {
+                    Verdict::Stale
+                } else {
+                    Verdict::Hit(entry.candidate_index)
+                }
+            }
+        }
+    };
+
+    // 失效条目立即回收，避免高并发短会话下 sticky_sessions 无界膨胀
+    if matches!(verdict, Verdict::Expired | Verdict::Stale) {
+        state.sticky_sessions.remove(session_key);
         return None;
     }
-    // 校验候选索引仍有效（配置变更后候选数可能不同）
-    if entry.candidate_index >= candidates.len() {
-        return None;
-    }
-    // 校验路由标识未变（配置调整或请求模型不同都会导致索引指向错误路线）
-    let expected = route_key_for_candidate(model, &candidates[entry.candidate_index]);
-    if entry.route_key != expected {
-        return None;
-    }
+
+    let index = match verdict {
+        Verdict::Hit(i) => i,
+        _ => unreachable!(),
+    };
+
     debug!(
         session_key = %session_key,
-        index = entry.candidate_index,
+        index = index,
         "sticky session hit"
     );
-    Some(entry.candidate_index)
+    Some(index)
 }
 
 /// 将选中结果写入粘性映射。
@@ -160,60 +187,98 @@ fn select_by_strategy(
 }
 
 /// 轮询：用原子计数器取模，保证均匀分配。
+///
+/// 计数器 key 包含候选数（`{model}#{len}`）：配置热重载导致候选数变化时
+/// 自动切换到新序列，避免模数突变造成的分配错乱。
 fn round_robin(state: &AppState, model: &str, len: usize) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    let key = format!("{model}#{len}");
     let counter = state
         .lb_counters
-        .entry(model.to_string())
+        .entry(key)
         .or_insert_with(|| std::sync::atomic::AtomicU64::new(0));
     let val = counter.fetch_add(1, Ordering::Relaxed);
     Some((val as usize) % len)
 }
 
-/// 均匀随机：使用系统时间纳秒作为随机源，避免引入 rand 依赖。
+/// 均匀随机。
 fn random_index(len: usize) -> Option<usize> {
     if len == 0 {
         return None;
     }
-    Some(system_nanos() as usize % len)
+    Some(rand::thread_rng().gen_range(0..len))
 }
 
 /// 加权随机：按 `route.weight` 比例分配概率。
+///
+/// 权重用 `u64` 累加，避免大权重下 `u32` 溢出。
 fn weighted_random(candidates: &[Candidate<'_>]) -> Option<usize> {
-    let weights: Vec<u32> = candidates
+    if candidates.is_empty() {
+        return None;
+    }
+    let weights: Vec<u64> = candidates
         .iter()
-        .map(|c| c.route.map(|r| r.weight).unwrap_or(1))
+        .map(|c| c.route.map(|r| r.weight as u64).unwrap_or(1))
         .collect();
-    let total: u32 = weights.iter().sum();
+    let total: u64 = weights.iter().sum();
     if total == 0 {
         return random_index(candidates.len());
     }
-    let r = (system_nanos() as u32) % total;
-    let mut acc = 0u32;
+    let r = rand::thread_rng().gen_range(0..total);
+    let mut acc = 0u64;
     for (i, &w) in weights.iter().enumerate() {
         acc += w;
         if r < acc {
             return Some(i);
         }
     }
-    Some(0)
+    Some(candidates.len() - 1)
 }
 
 /// 按响应速度选择：EWMA 延迟最低的优先。
 ///
-/// 无数据的候选延迟视为最慢（`u64::MAX`）：持续失败的上游永远没有成功样本，
-/// 若把未知延迟当作 0 会让它始终"看起来最快"而被优先选中。
+/// # 冷启动与陈旧数据处理
+/// 无样本 / 样本过期的候选不再直接用 `u64::MAX` 惩罚，否则：
+/// - 新加入的上游永远拿不到流量，无法产生样本，形成死锁；
+/// - 陈旧样本会长期主导选择，把流量锁死在早已变慢的上游上。
+///
+/// 实现上给"无新鲜样本"的候选一个**乐观基线延迟**——取当前所有新鲜样本中
+/// 的最小值的 80%（下浮 20% 使其相对更"吸引人"），从而保证它有机会被
+/// 选中并完成探测。若所有候选都无新鲜样本，则退化为随机选择。
 fn fastest_response(state: &AppState, candidates: &[Candidate<'_>], model: &str) -> Option<usize> {
+    if candidates.is_empty() {
+        return None;
+    }
+
+    // 收集每个候选的新鲜 EWMA 延迟
+    let fresh: Vec<Option<u64>> = candidates
+        .iter()
+        .map(|c| {
+            let key = route_key_for_candidate(model, c);
+            state.route_latency.get(&key).and_then(|s| {
+                if s.is_fresh() {
+                    Some(s.avg_ms())
+                } else {
+                    None
+                }
+            })
+        })
+        .collect();
+
+    // 全部无新鲜样本 → 随机选一个，让流量有机会产生首批样本
+    let min_fresh = fresh.iter().filter_map(|v| *v).min();
+    let baseline = match min_fresh {
+        None => return random_index(candidates.len()),
+        // 无新鲜样本的候选给一个略优于当前最快的乐观基线（下浮 20%）
+        Some(m) => m.saturating_mul(4).saturating_div(5),
+    };
+
     candidates
         .iter()
         .enumerate()
-        .min_by_key(|(_, c)| {
-            let key = route_key_for_candidate(model, c);
-            state
-                .route_latency
-                .get(&key)
-                .map(|s| s.avg_ms())
-                .unwrap_or(u64::MAX)
-        })
+        .min_by_key(|(i, _)| fresh[*i].unwrap_or(baseline))
         .map(|(i, _)| i)
 }
 
@@ -297,9 +362,67 @@ pub fn inc_in_flight(state: &AppState, key: &str) {
 }
 
 /// 在途请求计数 -1。
+///
+/// 使用饱和减法：即使因异常路径重复归还，也不会下溢成 `u64::MAX`
+/// （那会让该候选在 `LeastConnections` 下被永久排除且极难排查）。
 pub fn dec_in_flight(state: &AppState, key: &str) {
     if let Some(counter) = state.in_flight.get(key) {
-        counter.fetch_sub(1, Ordering::Relaxed);
+        counter
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                Some(v.saturating_sub(1))
+            })
+            .ok();
+    }
+}
+
+/// 在途计数 RAII guard：构造时 +1，析构时 -1。
+///
+/// 用于流式请求——SSE 流的生命周期跨越 `call_upstream` 返回之后，
+/// 计数必须持有到流真正结束（客户端断连 / 上游 EOF / 出错）才归还，
+/// 否则 `LeastConnections` 策略下所有候选恒为 0，退化成"永远选第一个"。
+///
+/// 调用方需要"提前归还"时（非流式请求在拿到 JSON 响应后即可归还）
+/// 使用 [`InFlightGuard::release`]。
+pub struct InFlightGuard {
+    state: Option<std::sync::Arc<AppState>>,
+    key: String,
+}
+
+impl InFlightGuard {
+    /// 计数 +1 并接管归还职责。
+    pub fn new(state: std::sync::Arc<AppState>, key: &str) -> Self {
+        inc_in_flight(&state, key);
+        Self {
+            state: Some(state),
+            key: key.to_string(),
+        }
+    }
+
+    /// 立即归还计数（之后析构不再重复归还）。
+    pub fn release(mut self) {
+        if let Some(state) = self.state.take() {
+            dec_in_flight(&state, &self.key);
+        }
+    }
+
+    /// 把 guard 的所有权转移进后台任务，使计数在流结束时才归还。
+    ///
+    /// 返回 `(Arc<AppState>, String)`，由后台任务在结束时调用
+    /// [`dec_in_flight`] 完成归还。
+    pub fn into_stream_parts(mut self) -> (std::sync::Arc<AppState>, String) {
+        let state = self
+            .state
+            .take()
+            .expect("InFlightGuard already released or moved");
+        (state, self.key.clone())
+    }
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        if let Some(state) = self.state.take() {
+            dec_in_flight(&state, &self.key);
+        }
     }
 }
 
@@ -315,28 +438,35 @@ pub fn record_latency(state: &AppState, key: &str, latency_ms: u64) {
 // ─────────────────────────── 后台清理 ───────────────────────────
 
 /// 启动后台定时任务，每 60 秒清理过期的 sticky 会话条目。
-pub fn spawn_sticky_cleanup(state: std::sync::Arc<AppState>, ttl_secs: u64) {
+///
+/// TTL 每轮从当前配置动态读取（而非启动时固化），使 GUI 修改粘性 TTL 后
+/// 无需重启即可生效。返回的 `JoinHandle` 由调用方在服务关闭时 `abort()`。
+pub fn spawn_sticky_cleanup(
+    state: std::sync::Arc<AppState>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
         loop {
             interval.tick().await;
+            // 动态读取当前 TTL，配置热重载后立即生效
+            let ttl_secs = state.config.read().load_balance.sticky.ttl_secs;
             let now = Instant::now();
             state
                 .sticky_sessions
                 .retain(|_, entry| now.duration_since(entry.created_at).as_secs() < ttl_secs);
+
+            // 顺带回收长期未使用的轮询计数器条目，避免 lb_counters 无界增长。
+            // 这里采用"分代清理"的简单策略：条目数超过阈值时整体重建，
+            // 因为 AtomicU64 不携带使用时间信息，无法逐条判断空闲时长。
+            if state.lb_counters.len() > LB_COUNTER_MAX {
+                state.lb_counters.clear();
+            }
         }
-    });
+    })
 }
 
-// ─────────────────────────── 内部工具 ───────────────────────────
-
-/// 获取当前系统时间的纳秒部分（用于轻量随机）。
-fn system_nanos() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos() as u128)
-        .unwrap_or(0)
-}
+/// `lb_counters` 条目数上限；超过后整体清空重建，防止无界增长。
+const LB_COUNTER_MAX: usize = 1024;
 
 // ─────────────────────────── 单元测试 ───────────────────────────
 
@@ -468,8 +598,9 @@ mod tests {
     }
 
     #[test]
-    fn fastest_response_avoids_unknown_latency() {
-        // 从未成功过（无延迟样本）的候选不应被视为"最快"
+    fn fastest_response_allows_cold_start() {
+        // 从未成功过（无延迟样本）的候选不应被永久饿死：
+        // 它必须有机会被选中以产生首批样本，否则新上游永远无法接入流量。
         let mut cfg = AppConfig::default();
         cfg.providers = vec![
             ProviderConfig {
@@ -500,9 +631,92 @@ mod tests {
 
         let idx = select(&state, &candidates, "m", None, &lb).unwrap();
         assert_eq!(
-            candidates[idx].provider.id, "known",
-            "无样本的候选不应优先于有样本的候选"
+            candidates[idx].provider.id, "unknown",
+            "无样本的候选应获得冷启动机会，而非被 u64::MAX 永久饿死"
         );
+
+        // 冷启动后（"unknown" 产生样本且更慢），流量应回到真正更快的候选
+        record_latency(&state, &route_key("m", "unknown", ""), 800);
+        let idx2 = select(&state, &candidates, "m", None, &lb).unwrap();
+        assert_eq!(
+            candidates[idx2].provider.id, "known",
+            "产生样本后应恢复按实际延迟选择"
+        );
+    }
+
+    #[test]
+    fn weighted_random_respects_weights() {
+        // 权重 9:1 时，采样分布应显著偏向高权重候选
+        let mut cfg = AppConfig::default();
+        cfg.providers = vec![
+            ProviderConfig {
+                id: "heavy".into(),
+                ..ProviderConfig::demo()
+            },
+            ProviderConfig {
+                id: "light".into(),
+                ..ProviderConfig::demo()
+            },
+        ];
+        cfg.routes = vec![
+            crate::proxy::config::RouteConfig {
+                model: "m".into(),
+                provider: "heavy".into(),
+                weight: 9,
+                ..Default::default()
+            },
+            crate::proxy::config::RouteConfig {
+                model: "m".into(),
+                provider: "light".into(),
+                weight: 1,
+                ..Default::default()
+            },
+        ];
+        let state = make_state();
+        let candidates = make_candidates(&cfg, "m");
+        assert_eq!(candidates.len(), 2);
+
+        let lb = LoadBalanceConfig {
+            enabled: true,
+            strategy: LbStrategy::Weighted,
+            sticky: StickyConfig {
+                enabled: false,
+                ..Default::default()
+            },
+        };
+
+        let mut heavy = 0;
+        let n = 4000;
+        for _ in 0..n {
+            let idx = select(&state, &candidates, "m", None, &lb).unwrap();
+            if candidates[idx].provider.id == "heavy" {
+                heavy += 1;
+            }
+        }
+        // 期望约 90%，允许 ±5% 误差
+        let ratio = heavy as f64 / n as f64;
+        assert!(
+            (0.85..=0.95).contains(&ratio),
+            "weighted distribution off: got {ratio:.3}, expected ~0.90"
+        );
+    }
+
+    #[test]
+    fn dec_in_flight_never_underflows() {
+        let state = make_state();
+        let key = route_key("m", "p", "");
+        // 未 inc 就 dec，或重复 dec，都不应下溢成 u64::MAX
+        dec_in_flight(&state, &key);
+        dec_in_flight(&state, &key);
+        inc_in_flight(&state, &key);
+        dec_in_flight(&state, &key);
+        dec_in_flight(&state, &key);
+        let v = state
+            .in_flight
+            .get(&key)
+            .map(|c| c.load(Ordering::Relaxed))
+            .unwrap_or(0);
+        assert_eq!(v, 0, "在途计数不应下溢");
     }
 
     #[test]

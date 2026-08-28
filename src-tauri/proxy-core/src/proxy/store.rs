@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::net::ToSocketAddrs;
 use std::path::PathBuf;
 
 use super::config::AppConfig;
@@ -43,6 +44,20 @@ pub fn validate(cfg: &AppConfig) -> Result<(), String> {
     if !(1..=65535).contains(&cfg.server.port) {
         return Err("端口必须在 1-65535 之间".into());
     }
+    let host = cfg.server.host.trim();
+    if host.is_empty() {
+        return Err("监听地址不能为空".into());
+    }
+    // 校验监听地址可解析；避免保存后服务重启失败
+    if format!("{host}:{}", cfg.server.port)
+        .to_socket_addrs()
+        .map(|mut a| a.next().is_none())
+        .unwrap_or(true)
+    {
+        return Err(format!(
+            "监听地址 '{host}' 不是合法的 IP 或域名"
+        ));
+    }
     let mut ids = std::collections::HashSet::new();
     for p in &cfg.providers {
         if p.id.trim().is_empty() {
@@ -75,6 +90,30 @@ pub fn validate(cfg: &AppConfig) -> Result<(), String> {
             }
         }
     }
+    // 用户校验：id 与 key 均需唯一，否则鉴权时会命中歧义条目
+    let mut user_ids = std::collections::HashSet::new();
+    let mut user_keys = std::collections::HashSet::new();
+    for u in &cfg.users {
+        if u.id.trim().is_empty() {
+            return Err("用户 id 不能为空".into());
+        }
+        if !user_ids.insert(u.id.clone()) {
+            return Err(format!("用户 id '{}' 重复", u.id));
+        }
+        if u.key.trim().is_empty() {
+            return Err(format!("用户 '{}' 的 API Key 不能为空", u.id));
+        }
+        if !user_keys.insert(u.key.clone()) {
+            return Err(format!("用户 '{}' 的 API Key 与其它用户重复", u.id));
+        }
+        if let Some(0) = u.max_requests {
+            return Err(format!(
+                "用户 '{}' 的请求上限不能为 0（请留空表示不限，或填正整数）",
+                u.id
+            ));
+        }
+    }
+
     for r in &cfg.routes {
         if r.model.trim().is_empty() {
             return Err("路由 model 不能为空".into());
@@ -85,11 +124,11 @@ pub fn validate(cfg: &AppConfig) -> Result<(), String> {
                 r.model, r.provider
             ));
         }
-        if r.weight == 0 {
-            return Err(format!(
-                "路由 '{}' 的 weight 不能为 0（负载均衡加权策略下会被忽略）",
-                r.model
-            ));
+        // weight = 0 是合法配置：表示该路由不参与常规分发，
+        // 仅在上游全部失败时作为 failover 兜底使用（配合 disabled=false）。
+        // 这里只拦截超出 u32 范围或明显异常的数值。
+        if r.weight > 1_000_000 {
+            return Err(format!("路由 '{}' 的 weight 过大（上限 1000000）", r.model));
         }
     }
     Ok(())
@@ -106,4 +145,9 @@ pub struct StatusDto {
     pub providers: usize,
     pub routes: usize,
     pub total_requests: u64,
+    /// 服务启动失败的原因（如端口被占用）；正常运行时为 null。
+    ///
+    /// 加 `default` 是为了兼容旧版前端/配置中不含该字段的场景。
+    #[serde(default)]
+    pub server_error: Option<String>,
 }

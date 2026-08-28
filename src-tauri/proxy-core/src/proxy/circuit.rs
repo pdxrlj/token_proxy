@@ -43,17 +43,12 @@ pub struct CircuitBreaker {
     cfg: CircuitBreakerConfig,
 }
 
-impl Clone for CircuitBreaker {
-    fn clone(&self) -> Self {
-        Self {
-            state: AtomicU8::new(self.state.load(Ordering::Relaxed)),
-            failures: AtomicU32::new(self.failures.load(Ordering::Relaxed)),
-            opened_at: Mutex::new(*self.opened_at.lock()),
-            probing: AtomicBool::new(self.probing.load(Ordering::Relaxed)),
-            cfg: self.cfg.clone(),
-        }
-    }
-}
+// 注意：故意**不**为 CircuitBreaker 实现 Clone。
+//
+// 熔断器状态必须全局唯一共享（通过 `Arc<CircuitBreaker>`）。若允许 Clone，
+// 得到的将是状态副本：`on_success()` / `on_failure()` 的写入不会反映到其它副本，
+// 熔断机制会静默失效且编译器不会产生任何警告。
+// 不实现 Clone 可以让编译器强制调用方只能通过 Arc 共享实例。
 
 impl CircuitBreaker {
     pub fn new(cfg: CircuitBreakerConfig) -> Self {
@@ -134,6 +129,28 @@ impl CircuitBreaker {
         BreakerStatus {
             state: self.state.load(Ordering::Relaxed).into(),
             consecutive_failures: self.failures.load(Ordering::Relaxed),
+        }
+    }
+
+    /// 熔断冷却剩余秒数。
+    ///
+    /// - 未熔断 / 冷却已结束 → `Some(0)`
+    /// - 处于 Open 且仍在冷却中 → `Some(剩余秒数)`
+    /// - 熔断未启用 → `None`（无冷却概念）
+    pub fn cooldown_remaining_secs(&self) -> Option<u64> {
+        if !self.cfg.enabled {
+            return None;
+        }
+        if self.state.load(Ordering::Relaxed) != OPEN {
+            return Some(0);
+        }
+        let elapsed = self.opened_at.lock().map(|t| t.elapsed());
+        match elapsed {
+            Some(e) => {
+                let total = Duration::from_secs(self.cfg.cooldown_secs);
+                Some(total.saturating_sub(e).as_secs())
+            }
+            None => Some(0),
         }
     }
 }

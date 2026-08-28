@@ -102,6 +102,11 @@ pub struct AppConfig {
     pub routes: Vec<RouteConfig>,
     #[serde(default)]
     pub load_balance: LoadBalanceConfig,
+    /// 用户列表（每人持有一个 API Key，可选携带；用于配额限制）
+    ///
+    /// `alias = "api_keys"` 用于读取改名前的旧配置文件，避免升级后用户数据丢失。
+    #[serde(default, alias = "api_keys")]
+    pub users: Vec<UserConfig>,
 }
 
 impl Default for AppConfig {
@@ -112,6 +117,52 @@ impl Default for AppConfig {
             providers: vec![ProviderConfig::demo()],
             routes: vec![],
             load_balance: LoadBalanceConfig::default(),
+            users: vec![],
+        }
+    }
+}
+
+// ─────────────────────────── 客户端 API Key 配置 ───────────────────────────
+
+/// 一个用户（User）。
+///
+/// 每个用户持有一个 API Key。客户端调用代理时**可以**在
+/// `Authorization: Bearer <key>` 中携带它（非强制）。
+/// 携带了已登记 Key 的请求会按 `max_requests` 做配额限制；
+/// 未携带 Key 的请求不限次（除非开启了 `server.require_api_key`）。
+///
+/// 注意：已用次数不存放在这里，而是运行时维护在 [`crate::proxy::state::AppState`] 中，
+/// 避免 GUI 保存配置时把计数覆盖回旧值（前端提交的 config 是此前获取的快照）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserConfig {
+    /// 唯一标识（用于配额计数与界面操作）
+    pub id: String,
+    /// 用户备注名，便于识别归属
+    pub name: String,
+    /// 该用户的 API Key；客户端以 Bearer 方式携带
+    pub key: String,
+    /// 是否启用；停用后该用户的 Key 视为无效
+    pub enabled: bool,
+    /// 最大请求数；`None` 表示不限制
+    #[serde(default)]
+    pub max_requests: Option<u64>,
+}
+
+impl UserConfig {
+    /// 该用户是否有配额上限
+    pub fn is_limited(&self) -> bool {
+        self.max_requests.is_some()
+    }
+}
+
+impl Default for UserConfig {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            key: String::new(),
+            enabled: true,
+            max_requests: None,
         }
     }
 }
@@ -124,6 +175,16 @@ pub struct ServerConfig {
     pub port: u16,
     /// 可选的本地访问令牌。为空则本机无需鉴权。
     pub local_api_key: String,
+    /// 是否强制要求请求携带已配置的 API Key。
+    ///
+    /// 默认 `false`。关闭时，未携带 Key 或携带了未登记 Key 的请求会被当作
+    /// 匿名请求放行——这是为了兼容「客户端总是自带 Authorization 头」的现实情况
+    /// （多数 OpenAI SDK 即使连本地代理也会带上自己的 key）。
+    ///
+    /// 但这也意味着：一旦配置了带配额的 API Key，客户端只要改发一个随机 Key
+    /// 就能绕过配额。因此**要让 API Key 的配额真正生效，必须开启本项**。
+    #[serde(default)]
+    pub require_api_key: bool,
 }
 
 impl Default for ServerConfig {
@@ -132,6 +193,7 @@ impl Default for ServerConfig {
             host: "127.0.0.1".into(),
             port: 8787,
             local_api_key: String::new(),
+            require_api_key: false,
         }
     }
 }
@@ -468,6 +530,33 @@ mod tests {
         let candidates = cfg.resolve_candidates("m1");
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].provider.id, "a");
+    }
+
+    #[test]
+    fn legacy_api_keys_field_still_loads() {
+        // 改名前导出的配置文件里字段叫 api_keys；改名后必须仍能读回，
+        // 否则老用户升级一次就会丢掉全部用户与配额设置。
+        let legacy = r#"{
+            "server": { "host": "127.0.0.1", "port": 8787, "local_api_key": "" },
+            "retry": {
+                "max_retries": 3, "base_delay_ms": 500, "max_delay_ms": 8000,
+                "retry_statuses": [429], "retry_on_network_error": true,
+                "circuit_breaker": { "enabled": true, "failure_threshold": 5, "cooldown_secs": 30 }
+            },
+            "providers": [],
+            "routes": [],
+            "load_balance": {
+                "enabled": false, "strategy": "round_robin",
+                "sticky": { "enabled": true, "session_key_source": { "type": "first_user_message" }, "ttl_secs": 1800 }
+            },
+            "api_keys": [
+                { "id": "alice", "name": "Alice", "key": "sk-tp-abc", "enabled": true, "max_requests": 100 }
+            ]
+        }"#;
+        let cfg: AppConfig = serde_json::from_str(legacy).expect("legacy config must parse");
+        assert_eq!(cfg.users.len(), 1, "旧字段 api_keys 应被读入 users");
+        assert_eq!(cfg.users[0].id, "alice");
+        assert_eq!(cfg.users[0].max_requests, Some(100));
     }
 
     #[test]

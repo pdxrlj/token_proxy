@@ -843,6 +843,106 @@ body {
   flex: none;
 }
 
+/* ---------------- 路由分组（按模型名聚合，多条路由即负载均衡） ---------------- */
+
+.route-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.route-group {
+  background: var(--bg-1);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  overflow: hidden;
+  transition: border-color 0.12s;
+}
+
+.route-group:hover {
+  border-color: var(--border-strong);
+}
+
+.route-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.route-group-head .model {
+  font-family: var(--font-mono);
+  font-weight: 650;
+  font-size: 13.5px;
+  color: var(--text-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.route-group-head .spacer {
+  flex: 1;
+}
+
+/* 表头与数据行共用同一套栅格，保证列始终对齐 */
+.route-row {
+  display: grid;
+  grid-template-columns:
+    minmax(110px, 1.3fr) minmax(120px, 1fr) 74px
+    minmax(84px, 0.9fr) 86px 30px;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.route-row:last-child {
+  border-bottom: none;
+}
+
+.route-row:not(.head):hover {
+  background: var(--bg-2);
+}
+
+.route-row.head {
+  padding-top: 6px;
+  padding-bottom: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  border-bottom-color: var(--border);
+}
+
+/* 停用行整体压暗，与 Provider 列表的停用观感一致 */
+.route-row.off {
+  opacity: 0.45;
+}
+
+.weight-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.weight-cell .pct {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-3);
+  line-height: 1.2;
+}
+
+.switch-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+
 /* ---------------- 路由链路图（静态虚线，移除流动动画） ---------------- */
 
 .link-list {

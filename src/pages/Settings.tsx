@@ -1,8 +1,17 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { AppData } from "../hooks/useAppData";
 import type { LbStrategy, SessionKeySource } from "../lib/types";
+import { api } from "../lib/tauri";
 import { Button, Field, Switch, useToast } from "../components/ui";
-import { FileCog, Flame, Network, RotateCcw, Server } from "lucide-react";
+import {
+  Download,
+  FileCog,
+  Flame,
+  Network,
+  RotateCcw,
+  Server,
+  Upload,
+} from "lucide-react";
 
 const DEFAULT_STATUSES = [408, 429, 500, 502, 503, 529];
 const PRESETS = {
@@ -16,6 +25,8 @@ export function Settings({ data }: { data: AppData }) {
   const toast = useToast();
   const [draft, setDraft] = useState(() => JSON.parse(JSON.stringify(config)));
   const [dirty, setDirty] = useState(false);
+  const [importSummary, setImportSummary] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
 
   const set = (patch: unknown) => {
     setDraft((d: typeof config) => merge(d, patch));
@@ -28,13 +39,103 @@ export function Settings({ data }: { data: AppData }) {
     set({ retry: { ...draft.retry, retry_statuses: next } });
   };
 
+  // 监听地址与当前生效地址不同 → 保存后需要重新绑定端口
+  const addrChanged =
+    status != null &&
+    (status.host !== draft.server.host || status.port !== draft.server.port);
+
   const persist = async () => {
     try {
       await save(draft);
       setDirty(false);
-      toast("设置已保存，代理立即生效");
+      toast(addrChanged ? "设置已保存，代理已在新地址重新监听" : "设置已保存，代理立即生效");
+      // 立即刷新状态，拿回真实监听端口（如端口被占用可及时提示）
+      await data.refresh();
     } catch (e) {
       toast(`保存失败：${e}`, "err");
+    }
+  };
+
+  // ── 配置导入导出 ──
+  const doExport = async () => {
+    try {
+      const json = await api.exportConfig();
+      const stamp = new Date()
+        .toISOString()
+        .slice(0, 19)
+        .replace(/[:T]/g, "-");
+      const blob = new Blob([json], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `token-proxy-config-${stamp}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      toast("配置已导出为 JSON 文件");
+    } catch (e) {
+      toast(`导出失败：${e}`, "err");
+    }
+  };
+
+  const onFilePicked = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    // 先清空 value，保证连续选择同一个文件时也能触发 change
+    e.target.value = "";
+    if (!file) return;
+
+    if (file.size > 5 * 1024 * 1024) {
+      toast("文件过大（超过 5MB），可能不是配置文件", "err");
+      return;
+    }
+    let text: string;
+    try {
+      text = await file.text();
+    } catch {
+      toast("读取文件失败", "err");
+      return;
+    }
+    // 前端先做一次 JSON 解析，给出更友好的错误定位
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      toast("导入失败：文件不是合法的 JSON", "err");
+      setImportSummary(null);
+      return;
+    }
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      toast("导入失败：配置内容应是一个 JSON 对象", "err");
+      setImportSummary(null);
+      return;
+    }
+    if (!("server" in parsed)) {
+      toast("导入失败：缺少 server 字段，可能不是本应用的配置文件", "err");
+      setImportSummary(null);
+      return;
+    }
+    if (
+      !window.confirm(
+        "导入将整体替换当前配置（含 Provider、路由、API Key 等），且无法撤销。\n\n确定继续吗？",
+      )
+    ) {
+      return;
+    }
+
+    try {
+      const cfg = await api.importConfig(text);
+      setImportSummary(
+        [
+          `已导入：${file.name}`,
+          `Provider ${cfg.providers.length} 个 · 路由 ${cfg.routes.length} 条 · 用户 ${(cfg.users ?? []).length} 个`,
+          `监听 ${cfg.server.host}:${cfg.server.port}`,
+        ].join("\n"),
+      );
+      toast("配置导入成功，已即时生效");
+      await data.refresh();
+    } catch (err) {
+      const msg = String(err);
+      toast(`导入失败：${msg}`, "err");
+      setImportSummary(null);
     }
   };
 
@@ -50,10 +151,11 @@ export function Settings({ data }: { data: AppData }) {
           </div>
           <div className="section">
             <div className="form-row">
-              <Field label="监听地址">
+              <Field label="监听地址" help="127.0.0.1 仅本机；0.0.0.0 允许局域网访问">
                 <input
                   className="input mono"
                   value={draft.server.host}
+                  placeholder="127.0.0.1"
                   onChange={(e) => set({ server: { ...draft.server, host: e.target.value.trim() } })}
                 />
               </Field>
@@ -68,6 +170,15 @@ export function Settings({ data }: { data: AppData }) {
                 />
               </Field>
             </div>
+            {addrChanged && (
+              <div style={{ marginTop: 10, padding: "8px 12px", background: "var(--bg-2)", borderRadius: 8, fontSize: 12, color: "var(--amber)", border: "1px solid var(--border)" }}>
+                监听地址将从 {status ? `${status.host}:${status.port}` : "当前地址"} 变更为{" "}
+                <span className="mono">
+                  {draft.server.host}:{draft.server.port}
+                </span>
+                ，保存后代理会自动重新监听，无需重启应用。
+              </div>
+            )}
             <div style={{ height: 12 }} />
             <Field label="本地访问令牌" help="留空则本机免鉴权；设置后客户端需带 Authorization: Bearer <令牌>">
               <input
@@ -78,11 +189,20 @@ export function Settings({ data }: { data: AppData }) {
                 onChange={(e) => set({ server: { ...draft.server, local_api_key: e.target.value } })}
               />
             </Field>
+            {status?.server_error && (
+              <div style={{ marginTop: 12, padding: "10px 12px", background: "var(--bg-2)", borderRadius: 10, fontSize: 12, color: "var(--rose)", border: "1px solid var(--border)" }}>
+                代理未在运行：{status.server_error}
+                <br />
+                请修改监听地址或端口后重新保存。
+              </div>
+            )}
             {status && (
               <div style={{ marginTop: 14, padding: "10px 12px", background: "var(--bg-2)", borderRadius: 10, fontSize: 12, color: "var(--text-3)", fontFamily: "var(--font-mono)" }}>
                 配置文件：{status.config_path}
                 <br />
-                修改配置会热重载，无需重启应用
+                当前监听：{status.host}:{status.port}
+                <br />
+                除监听地址外，其余配置热重载，无需重启应用
               </div>
             )}
           </div>
@@ -301,6 +421,50 @@ export function Settings({ data }: { data: AppData }) {
                 />
               </Field>
             )}
+          </div>
+        )}
+      </div>
+
+      {/* 配置导入导出 */}
+      <div className="card">
+        <div className="card-header">
+          <span className="card-title" style={{ display: "flex", alignItems: "center", gap: 7 }}>
+            <FileCog size={13} /> 配置导入导出
+          </span>
+        </div>
+        <p style={{ color: "var(--text-3)", fontSize: 12.5, marginBottom: 12, lineHeight: 1.7 }}>
+          导出会生成一份包含<b>全部配置</b>的 JSON 文件，含上游 API Key、本地访问令牌与客户端 API Key
+          等敏感信息，请妥善保管。导入会<b>整体替换</b>当前配置。
+        </p>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <Button onClick={doExport}>
+            <Download size={14} /> 导出配置
+          </Button>
+          <Button onClick={() => fileRef.current?.click()}>
+            <Upload size={14} /> 导入配置
+          </Button>
+          <input
+            ref={fileRef}
+            type="file"
+            accept="application/json,.json"
+            style={{ display: "none" }}
+            onChange={onFilePicked}
+          />
+        </div>
+        {importSummary && (
+          <div
+            style={{
+              marginTop: 12,
+              padding: "10px 12px",
+              background: "var(--bg-2)",
+              borderRadius: 8,
+              fontSize: 12,
+              color: "var(--text-3)",
+              fontFamily: "var(--font-mono)",
+              lineHeight: 1.8,
+            }}
+          >
+            {importSummary}
           </div>
         )}
       </div>

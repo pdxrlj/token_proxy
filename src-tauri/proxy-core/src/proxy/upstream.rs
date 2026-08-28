@@ -14,7 +14,20 @@ use tracing::warn;
 /// 上游调用结果：完整 JSON 或 可转发的响应流
 pub enum UpstreamOutcome {
     Json(serde_json::Value),
+    /// 尚未绑定在途计数 guard 的原始流（仅由 `call_upstream` 产生）。
+    ///
+    /// `route_and_call` 会立即将其包装为 [`UpstreamOutcome::StreamWithGuard`]，
+    /// 因此业务层不应直接匹配此变体。
     Stream(reqwest::Response),
+    /// 流式响应 + 在途计数 guard（业务层唯一应处理的流式变体）。
+    ///
+    /// SSE 流的生命周期跨越 `route_and_call` 返回之后，guard 随之转移给
+    /// 流式转发逻辑，在流真正结束时归还计数；这样 `LeastConnections`
+    /// 策略才能感知到流式请求的并发，不至于退化成"永远选第一个候选"。
+    StreamWithGuard {
+        resp: reqwest::Response,
+        guard: crate::proxy::lb::InFlightGuard,
+    },
 }
 
 /// 从 usage 对象提取缓存命中的 token 数量（返回 0 表示未命中）。
@@ -81,6 +94,8 @@ pub async fn call_upstream(
             .and_then(|s| s.as_bool())
             .unwrap_or(false);
         if wants_stream {
+            // 流式请求不在此时归还在途计数：由 route_and_call 接手 guard
+            // 并随流转移，在流真正结束时归还。
             return Ok(UpstreamOutcome::Stream(resp));
         }
         let json = resp
@@ -125,6 +140,9 @@ pub fn forward_sse(
     log_provider: Option<String>,
     log_tokens_in: Option<u64>,
     provider_id: Option<String>,
+    // 在途计数 guard：随流转移进来，在流结束时归还。
+    // 为 `None` 时表示调用方未启用在途计数（如兜底透传路径）。
+    inflight: Option<crate::proxy::lb::InFlightGuard>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     // 后台任务向此 channel 发送已序列化的 SSE data 行；客户端从接收端读取。
     // channel 容量有限：当客户端断连后接收端被丢弃，发送端会返回错误，
@@ -133,6 +151,9 @@ pub fn forward_sse(
 
     // 后台任务：消费上游字节流，解析 SSE 行，统计 usage / 字节，聚合入库
     tokio::spawn(async move {
+        // guard 随后台任务移动：无论流是正常结束、出错还是被提前中断，
+        // 都会在任务结束时（guard 析构）归还在途计数。
+        let _inflight = inflight;
         let usage = Mutex::new(None::<(u64, u64)>);
         let mut cache_hit = false;
         let mut cached_tokens: u64 = 0;

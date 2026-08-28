@@ -26,6 +26,8 @@ async fn main() {
         provider: "mock".into(),
         upstream_model: String::new(),
         overrides: serde_json::Map::new(),
+        weight: 1,
+        disabled: false,
     }];
 
     let state = Arc::new(AppState::new(cfg, PathBuf::from("smoke-config.json")));

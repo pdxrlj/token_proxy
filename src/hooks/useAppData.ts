@@ -14,6 +14,8 @@ export interface AppData {
   status: StatusDto | null;
   metrics: MetricsSnapshot;
   breakers: BreakerMap;
+  /** 各用户的已用请求数：{ id: 次数 } */
+  userUsage: Record<string, number>;
   /** 最近一次刷新错误 */
   error: string | null;
   /** 有流式请求在途（驱动顶部脉冲条） */
@@ -21,6 +23,7 @@ export interface AppData {
   refresh: () => Promise<void>;
   save: (cfg: AppConfig) => Promise<void>;
   resetBreaker: (providerId: string) => Promise<void>;
+  resetUserUsage: (id?: string | null) => Promise<void>;
 }
 
 export function useAppData(): AppData {
@@ -37,22 +40,25 @@ export function useAppData(): AppData {
     recent: [],
   });
   const [breakers, setBreakers] = useState<BreakerMap>({});
+  const [userUsage, setUserUsage] = useState<Record<string, number>>({});
   const [error, setError] = useState<string | null>(null);
   const [streaming, setStreaming] = useState(false);
   const streamCount = useRef(0);
 
   const refresh = useCallback(async () => {
     try {
-      const [cfg, st, ms, bs] = await Promise.all([
+      const [cfg, st, ms, bs, usage] = await Promise.all([
         api.getConfig(),
         api.getStatus(),
         api.getMetrics(),
         api.getBreakerStatus(),
+        api.getUserUsage(),
       ]);
       setConfig(cfg);
       setStatus(st);
       setMetrics(ms);
       setBreakers(bs);
+      setUserUsage(usage);
       setError(null);
     } catch (e) {
       setError(String(e));
@@ -184,15 +190,22 @@ export function useAppData(): AppData {
     setBreakers(await api.getBreakerStatus());
   }, []);
 
+  const resetUserUsage = useCallback(async (id?: string | null) => {
+    await api.resetUserUsage(id ?? null);
+    setUserUsage(await api.getUserUsage());
+  }, []);
+
   return {
     config,
     status,
     metrics,
     breakers,
+    userUsage,
     error,
     streaming,
     refresh,
     save,
     resetBreaker,
+    resetUserUsage,
   };
 }

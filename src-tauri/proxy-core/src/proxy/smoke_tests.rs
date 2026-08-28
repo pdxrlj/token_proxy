@@ -2,6 +2,7 @@
 // 进程内启动 mock 上游 + 代理服务器，验证 转发 / 流式 SSE / 重试 / 熔断 全链路。
 use crate::proxy;
 use crate::proxy::config::{AppConfig, ProviderConfig, RouteConfig};
+use crate::proxy::lb;
 use crate::proxy::state::AppState;
 use axum::extract::Json;
 use axum::http::StatusCode;
@@ -325,7 +326,11 @@ async fn smoke_full_chain() {
     assert_eq!(mock_counter4.load(Ordering::SeqCst), 4);
     // 第 2 次请求：熔断打开 → 立即 503，不再打到上游
     {
-        let b = state4.breakers.get("mock").expect("breaker exists");
+        // 熔断器按 route 维度隔离，key = `model|provider|upstream_model`
+        let b = state4
+            .breakers
+            .get(&lb::route_key("mock-model", "mock", ""))
+            .expect("breaker exists");
         let st = b.status();
         eprintln!(
             "DEBUG breaker state={:?} failures={}",
@@ -350,8 +355,34 @@ async fn smoke_full_chain() {
     );
     let err: Value = resp.json().await.unwrap();
     assert_eq!(err["error"]["type"], "circuit_open");
+
+    // 熔断请求应在日志里留下结构化错误详情（含渠道、连续失败次数、冷却剩余）
+    let snap = state4.metrics.snapshot();
+    let failed_log = snap
+        .recent
+        .iter()
+        .find(|l| l.error_detail.is_some())
+        .expect("failed request should carry error_detail");
+    let detail = failed_log.error_detail.as_ref().unwrap();
+    assert_eq!(detail.kind, crate::proxy::retry::ErrorKind::CircuitOpen);
+    assert!(
+        detail.summary.contains("Mock"),
+        "summary should name the provider: {}",
+        detail.summary
+    );
+    assert!(detail.hint.is_some(), "熔断错误应附带排查建议");
+    assert!(detail.consecutive_failures.unwrap_or(0) >= 4);
+    assert!(
+        detail.cooldown_remaining_secs.is_some(),
+        "应报告熔断冷却剩余时间"
+    );
+
     // 手动重置熔断后恢复
-    state4.breakers.get("mock").expect("breaker exists").reset();
+    state4
+        .breakers
+        .get(&lb::route_key("mock-model", "mock", ""))
+        .expect("breaker exists")
+        .reset();
     body["x_mock_fail_n"] = json!(0);
     body["x_mock_fail"] = Value::Null;
     let resp = client

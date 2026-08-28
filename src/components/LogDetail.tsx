@@ -1,6 +1,6 @@
-import type { RequestLog } from "../lib/types";
+import type { ErrorDetail, ErrorKind, RequestLog } from "../lib/types";
 import { Modal, fmtBytes, fmtCount, fmtDuration } from "./ui";
-import { Check, Copy, RefreshCw, X } from "lucide-react";
+import { AlertTriangle, Check, Copy, Lightbulb, RefreshCw, X } from "lucide-react";
 import { useState } from "react";
 
 function fmtDateTime(ts: number): string {
@@ -9,6 +9,214 @@ function fmtDateTime(ts: number): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(
     d.getHours(),
   )}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+/** 各错误大类的中文标题 */
+const KIND_TITLE: Record<ErrorKind, string> = {
+  upstream: "上游返回错误",
+  circuit_open: "渠道已熔断",
+  network: "网络连接失败",
+  timeout: "请求超时",
+  route_not_found: "找不到可用路由",
+  bad_request: "请求参数有误",
+  unauthorized: "鉴权失败",
+  internal: "代理内部错误",
+};
+
+/** 把秒数格式化为「1 分 30 秒」这类可读文本 */
+function fmtCooldown(secs: number): string {
+  if (secs <= 0) return "可立即重试";
+  if (secs < 60) return `约 ${secs} 秒后自动恢复`;
+  const m = Math.floor(secs / 60);
+  const s = secs % 60;
+  return s === 0 ? `约 ${m} 分钟后自动恢复` : `约 ${m} 分 ${s} 秒后自动恢复`;
+}
+
+/** 结构化错误详情面板：摘要 / 原始错误 / 上下文 / 排查建议 */
+function ErrorPanel({ detail, raw }: { detail: ErrorDetail; raw: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const copy = async () => {
+    const text = [
+      `【${KIND_TITLE[detail.kind]}】${detail.summary}`,
+      detail.detail ? `详情：${detail.detail}` : "",
+      detail.hint ? `建议：${detail.hint}` : "",
+      detail.provider ? `渠道：${detail.provider}` : "",
+      detail.endpoint ? `端点：${detail.endpoint}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* 忽略剪贴板失败 */
+    }
+  };
+
+  // 上下文行：只在有值时渲染，避免满屏「—」
+  const ctxRows: Array<[string, string]> = [];
+  if (detail.provider) ctxRows.push(["失败渠道", detail.provider]);
+  if (detail.upstream_model) ctxRows.push(["上游模型", detail.upstream_model]);
+  if (detail.upstream_status != null)
+    ctxRows.push(["上游状态码", String(detail.upstream_status)]);
+  if (detail.endpoint) ctxRows.push(["请求端点", detail.endpoint]);
+  if (detail.candidates_tried != null && detail.total_candidates != null)
+    ctxRows.push(["已试渠道", `${detail.candidates_tried} / ${detail.total_candidates}`]);
+  if (detail.retries) ctxRows.push(["重试次数", `${detail.retries} 次`]);
+  if (detail.consecutive_failures)
+    ctxRows.push(["连续失败", `${detail.consecutive_failures} 次`]);
+  if (detail.cooldown_remaining_secs != null)
+    ctxRows.push(["熔断恢复", fmtCooldown(detail.cooldown_remaining_secs)]);
+
+  return (
+    <div
+      style={{
+        marginTop: 10,
+        background: "var(--rose-soft)",
+        border: "1px solid rgba(251,113,133,.3)",
+        borderRadius: 12,
+        overflow: "hidden",
+      }}
+    >
+      {/* 头部：标题 + 复制 */}
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          gap: 8,
+          padding: "11px 14px",
+          borderBottom: "1px solid rgba(251,113,133,.2)",
+        }}
+      >
+        <span
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            color: "var(--rose)",
+            fontWeight: 600,
+            fontSize: 12.5,
+          }}
+        >
+          <AlertTriangle size={13} />
+          {KIND_TITLE[detail.kind]}
+        </span>
+        <button
+          className="btn ghost sm"
+          onClick={copy}
+          style={{ padding: "3px 8px", fontSize: 11.5 }}
+        >
+          {copied ? <Check size={12} /> : <Copy size={12} />}
+          {copied ? "已复制" : "复制"}
+        </button>
+      </div>
+
+      <div style={{ padding: "11px 14px", display: "grid", gap: 10 }}>
+        {/* 摘要 */}
+        <div style={{ fontSize: 13, color: "var(--text-1)", lineHeight: 1.6 }}>
+          {detail.summary}
+        </div>
+
+        {/* 上游原始错误 */}
+        {detail.detail && (
+          <div>
+            <div
+              style={{
+                fontSize: 11,
+                color: "var(--text-3)",
+                marginBottom: 4,
+                fontWeight: 600,
+              }}
+            >
+              原始错误
+            </div>
+            <div
+              className="mono"
+              style={{
+                fontSize: 11.5,
+                color: "var(--rose)",
+                background: "var(--bg-1)",
+                border: "1px solid var(--border-soft)",
+                borderRadius: 8,
+                padding: "8px 10px",
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-all",
+                lineHeight: 1.6,
+                maxHeight: 160,
+                overflowY: "auto",
+              }}
+            >
+              {detail.detail}
+            </div>
+          </div>
+        )}
+
+        {/* 上下文 */}
+        {ctxRows.length > 0 && (
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "auto 1fr",
+              gap: "4px 12px",
+              fontSize: 12,
+            }}
+          >
+            {ctxRows.map(([k, v]) => (
+              <div key={k} style={{ display: "contents" }}>
+                <span style={{ color: "var(--text-3)" }}>{k}</span>
+                <span
+                  className="mono"
+                  style={{ color: "var(--text-1)", wordBreak: "break-all" }}
+                >
+                  {v}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* 排查建议 */}
+        {detail.hint && (
+          <div
+            style={{
+              display: "flex",
+              gap: 7,
+              padding: "9px 11px",
+              background: "var(--bg-1)",
+              border: "1px solid var(--border-soft)",
+              borderRadius: 8,
+            }}
+          >
+            <Lightbulb
+              size={13}
+              style={{ color: "var(--amber)", flex: "none", marginTop: 1 }}
+            />
+            <span style={{ fontSize: 12, color: "var(--text-2)", lineHeight: 1.65 }}>
+              {detail.hint}
+            </span>
+          </div>
+        )}
+
+        {/* 兜底：无结构化详情时展示原始错误字符串 */}
+        {!detail.detail && raw && (
+          <div
+            className="mono"
+            style={{
+              fontSize: 11.5,
+              color: "var(--text-3)",
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-all",
+            }}
+          >
+            {raw}
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 function Row({ k, v, mono }: { k: string; v: React.ReactNode; mono?: boolean }) {
@@ -112,8 +320,11 @@ export function LogDetailModal({
         />
       </div>
 
-      {/* 错误详情（完整信息 + 复制） */}
-      {log.error && (
+      {/* 错误详情（结构化：摘要 / 原始错误 / 上下文 / 建议） */}
+      {log.error_detail && <ErrorPanel detail={log.error_detail} raw={log.error ?? ""} />}
+
+      {/* 兼容：旧数据只有扁平错误字符串，没有结构化详情 */}
+      {log.error && !log.error_detail && (
         <div
           style={{
             marginTop: 10,
