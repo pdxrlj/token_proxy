@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use tauri::Manager;
+use tauri_plugin_dialog::DialogExt;
 use token_proxy_core::proxy::config::AppConfig;
 use token_proxy_core::proxy::db::{default_db_path, init_db, Database, DatasetRecord};
 use token_proxy_core::proxy::state::{AppState, EventSink, RequestLog};
@@ -63,11 +64,69 @@ async fn save_config(
 
 /// 导出当前完整配置为 JSON 字符串（含 API Key）。
 ///
-/// 由前端负责落盘（浏览器下载），避免引入文件对话框插件依赖。
+/// 保留供脚本 / 调试使用；应用内的「导出配置」走
+/// [`export_config_to_file`]，由用户选择保存位置。
 #[tauri::command]
 fn export_config(state: tauri::State<Arc<AppState>>) -> Result<String, String> {
     let cfg = state.config.read().clone();
     serde_json::to_string_pretty(&cfg).map_err(|e| format!("序列化配置失败：{e}"))
+}
+
+/// 弹出「另存为」对话框，把配置写入用户选择的位置。
+///
+/// 返回实际写入路径；用户取消时返回 `Ok(None)`。
+///
+/// 落盘由 Rust 直接完成（而非交给 WebView 下载）：
+/// WebView 的程序化下载在桌面端常被静默丢弃，用户无从得知文件去了哪里，
+/// 而对话框能明确给出位置，且无需给前端开放任意文件写权限。
+#[tauri::command]
+async fn export_config_to_file(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+    default_name: Option<String>,
+) -> Result<Option<String>, String> {
+    let json = export_config(state)?;
+
+    let file_name = default_name
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| "token-proxy-config.json".to_string());
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let mut dialog = app
+        .dialog()
+        .file()
+        .set_file_name(file_name)
+        .add_filter("JSON 配置文件", &["json"]);
+    // 默认落在下载目录；取不到时退回系统对话框自己的默认位置
+    if let Ok(dir) = app.path().download_dir() {
+        dialog = dialog.set_directory(dir);
+    }
+    dialog.save_file(move |chosen| {
+        let path = chosen.and_then(|p| p.into_path().ok());
+        let _ = tx.send(path);
+    });
+
+    let chosen = rx
+        .await
+        .map_err(|_| "文件对话框已关闭，未导出".to_string())?;
+    let Some(path) = chosen else {
+        // 用户点了取消，不是错误
+        return Ok(None);
+    };
+
+    // 用户没写后缀时补上 .json，避免生成"无类型"文件
+    let path = match path.extension() {
+        Some(_) => path,
+        None => {
+            let mut p = path.into_os_string();
+            p.push(".json");
+            std::path::PathBuf::from(p)
+        }
+    };
+
+    std::fs::write(&path, json).map_err(|e| format!("写入文件失败：{e}"))?;
+    Ok(Some(path.display().to_string()))
 }
 
 /// 导入配置：校验 → 写盘 → 热生效（含按需重启监听）。
@@ -253,6 +312,7 @@ fn delete_dataset_record(state: tauri::State<Arc<AppState>>, id: i64) -> Result<
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let _ = tracing_subscriber::fmt()
                 .with_env_filter(
@@ -342,6 +402,7 @@ pub fn run() {
             save_config,
             reload_config,
             export_config,
+            export_config_to_file,
             import_config,
             reset_user_usage,
             get_user_usage,

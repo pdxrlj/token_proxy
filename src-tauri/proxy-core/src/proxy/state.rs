@@ -366,8 +366,13 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(config: AppConfig, config_path: PathBuf) -> Self {
+        // 默认头给出"普通客户端"的底色：带 UA、带 accept。
+        // 具体请求若透传到了客户端自己的头，会在请求级覆盖这里的默认值。
+        // 同时由 Cargo feature 打开 gzip/brotli/deflate 与 http2，
+        // 使 accept-encoding 与协议版本也贴近常规客户端。
         let http = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(15))
+            .default_headers(crate::proxy::headers::client_default_headers())
             .build()
             .expect("failed to build http client");
         Self {

@@ -20,6 +20,7 @@ async fn main() {
         timeout_secs: 30,
         enabled: true,
         models: vec!["mock-model".into(), "gpt-4o".into()],
+        ..ProviderConfig::demo()
     }];
     cfg.routes = vec![RouteConfig {
         model: "gpt-4o".into(),

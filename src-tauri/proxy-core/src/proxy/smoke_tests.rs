@@ -160,6 +160,7 @@ async fn spawn_proxy_with_key(
         timeout_secs: 30,
         enabled: true,
         models: vec!["mock-model".into()],
+        ..ProviderConfig::demo()
     }];
     cfg.routes = vec![RouteConfig {
         model: "mock-model".into(),
@@ -448,4 +449,72 @@ async fn smoke_full_chain() {
         1,
         "only the authed request reaches upstream"
     );
+}
+
+/// 端到端验证请求头：客户端的身份类头原样到达上游，代理特征头不外泄。
+///
+/// 上游若只看请求头也应认为"这是客户端直连"：UA / 组织 / 官方 SDK 指纹头齐全，
+/// 且没有 `x-forwarded-for`、`via` 之类自报代理身份的头。
+#[tokio::test]
+async fn smoke_forwards_client_identity_headers() {
+    let seen: Arc<Mutex<Option<axum::http::HeaderMap>>> = Arc::new(Mutex::new(None));
+    let recorder = seen.clone();
+    // mock 原样回显请求体，便于代理走通非流式路径
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |headers: axum::http::HeaderMap, Json(body): Json<Value>| async move {
+            *recorder.lock().unwrap() = Some(headers);
+            Json(body)
+        }),
+    );
+    let listener = TcpListener::bind(("127.0.0.1", 9911))
+        .await
+        .expect("bind mock port");
+    tokio::spawn(async move { axum::serve(listener, app).await.expect("mock server") });
+    let _state = spawn_proxy(8797, 9911, None).await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post("http://127.0.0.1:8797/v1/chat/completions")
+        .header("user-agent", "OpenAI/NodeJS/4.68.4")
+        .header("openai-organization", "org-42")
+        .header("x-stainless-lang", "node")
+        .header("accept", "application/json")
+        .header("x-forwarded-for", "1.2.3.4")
+        .header("via", "1.1 somewhere")
+        .json(&chat_body(false))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let first = seen.lock().unwrap().clone().expect("upstream must be hit");
+    assert_eq!(first.get("user-agent").unwrap(), "OpenAI/NodeJS/4.68.4");
+    assert_eq!(first.get("openai-organization").unwrap(), "org-42");
+    assert_eq!(first.get("x-stainless-lang").unwrap(), "node");
+    assert_eq!(first.get("accept").unwrap(), "application/json");
+    assert!(first.get("x-forwarded-for").is_none(), "不得泄露代理特征头");
+    assert!(first.get("via").is_none(), "不得泄露代理特征头");
+    assert!(
+        first.get("authorization").is_none(),
+        "客户端的本地令牌不得外泄到上游"
+    );
+
+    // 客户端完全不带 UA 时，上游也应收到一个"普通客户端形态"的 UA，而不是空值。
+    // 该 client 由 `Client::new()` 创建，本身不带 UA。
+    *seen.lock().unwrap() = None;
+    let resp = client
+        .post("http://127.0.0.1:8797/v1/chat/completions")
+        .json(&chat_body(false))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let second = seen.lock().unwrap().clone().expect("upstream must be hit");
+    let ua = second
+        .get("user-agent")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    assert!(!ua.is_empty(), "上游必须能看到 UA，不能是空值");
 }

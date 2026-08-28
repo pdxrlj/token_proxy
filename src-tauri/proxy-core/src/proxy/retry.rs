@@ -1,5 +1,5 @@
 use crate::proxy::config::RetryConfig;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use serde::Serialize;
 use thiserror::Error;
 
@@ -10,6 +10,8 @@ pub enum ProxyError {
     Upstream {
         status: u16,
         body: serde_json::Value,
+        /// 上游响应头（用于把 `x-request-id`、`retry-after` 等回传给客户端）
+        headers: HeaderMap,
     },
     #[error("circuit breaker open for provider '{0}'")]
     CircuitOpen(String),
@@ -207,6 +209,14 @@ impl ProxyError {
         }
     }
 
+    /// 上游响应头（仅 `Upstream` 类型有值；用于回传给客户端）
+    pub fn upstream_headers(&self) -> Option<&HeaderMap> {
+        match self {
+            ProxyError::Upstream { headers, .. } => Some(headers),
+            _ => None,
+        }
+    }
+
     /// OpenAI 兼容错误体
     pub fn openai_error(&self) -> serde_json::Value {
         serde_json::json!({
@@ -333,17 +343,20 @@ mod tests {
         let cfg = RetryConfig::default();
         assert!(ProxyError::Upstream {
             status: 429,
-            body: serde_json::json!({})
+            body: serde_json::json!({}),
+            headers: HeaderMap::new(),
         }
         .retriable(&cfg));
         assert!(ProxyError::Upstream {
             status: 503,
-            body: serde_json::json!({})
+            body: serde_json::json!({}),
+            headers: HeaderMap::new(),
         }
         .retriable(&cfg));
         assert!(!ProxyError::Upstream {
             status: 400,
-            body: serde_json::json!({})
+            body: serde_json::json!({}),
+            headers: HeaderMap::new(),
         }
         .retriable(&cfg));
         assert!(ProxyError::Network("boom".into()).retriable(&cfg));
@@ -381,7 +394,11 @@ mod tests {
         let body = serde_json::json!({
             "error": { "message": "insufficient quota", "type": "quota_exceeded", "code": "429" }
         });
-        let e = ProxyError::Upstream { status: 429, body };
+        let e = ProxyError::Upstream {
+            status: 429,
+            body,
+            headers: HeaderMap::new(),
+        };
         let d = e.to_detail(ErrorContext::default());
         assert_eq!(d.kind, ErrorKind::Upstream);
         assert_eq!(d.upstream_status, Some(429));

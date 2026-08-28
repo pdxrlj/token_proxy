@@ -1,7 +1,9 @@
 use crate::proxy::config::ProviderConfig;
+use crate::proxy::headers::build_upstream_headers;
 use crate::proxy::retry::ProxyError;
 use crate::proxy::state::AppState;
 use axum::body::Body;
+use axum::http::HeaderMap;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_util::stream::StreamExt;
 use futures_util::Stream;
@@ -11,9 +13,18 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::warn;
 
+/// 完整 JSON 响应 + 上游响应头。
+///
+/// 带上响应头是为了把上游的 `x-request-id` / 限流 / 组织等头回传给客户端，
+/// 否则客户端看到的世界与直连不一致（排障时拿不到上游追踪 ID）。
+pub struct JsonOutcome {
+    pub value: serde_json::Value,
+    pub headers: HeaderMap,
+}
+
 /// 上游调用结果：完整 JSON 或 可转发的响应流
 pub enum UpstreamOutcome {
-    Json(serde_json::Value),
+    Json(JsonOutcome),
     /// 尚未绑定在途计数 guard 的原始流（仅由 `call_upstream` 产生）。
     ///
     /// `route_and_call` 会立即将其包装为 [`UpstreamOutcome::StreamWithGuard`]，
@@ -67,16 +78,22 @@ pub fn detect_cache_hit(usage: &serde_json::Value) -> bool {
 }
 
 /// 向指定 provider 发起 OpenAI 兼容请求
+///
+/// `client_headers` 是客户端发往本代理的原始请求头，按白名单透传给上游，
+/// 使上游看到的请求与客户端直连时一致（详见 [`crate::proxy::headers`]）。
 pub async fn call_upstream(
     state: &AppState,
     provider: &ProviderConfig,
     path: &str,
     body: serde_json::Value,
+    client_headers: &HeaderMap,
 ) -> Result<UpstreamOutcome, ProxyError> {
     let url = provider.endpoint(path);
     let mut req = state.http.post(&url).json(&body);
-    if !provider.api_key.is_empty() {
-        req = req.bearer_auth(&provider.api_key);
+    // 逐个 header 追加（而非整体替换）：保留 reqwest 自动设置的
+    // content-type / host 等，只覆盖同名的那几项。
+    for (name, value) in build_upstream_headers(client_headers, provider) {
+        req = req.header(name, value);
     }
     let timeout = std::time::Duration::from_secs(provider.timeout_secs.max(30));
     let resp = req.timeout(timeout).send().await.map_err(|e| {
@@ -88,6 +105,9 @@ pub async fn call_upstream(
     })?;
 
     let status = resp.status();
+    // 上游响应头需要回传给客户端（追踪 ID、限流余量等），
+    // 而 resp 随后会被消费成 JSON / 字节流，故先 clone。
+    let resp_headers = resp.headers().clone();
     if status.is_success() {
         let wants_stream = body
             .get("stream")
@@ -102,7 +122,10 @@ pub async fn call_upstream(
             .json::<serde_json::Value>()
             .await
             .map_err(|e| ProxyError::Network(format!("invalid upstream json: {e}")))?;
-        Ok(UpstreamOutcome::Json(json))
+        Ok(UpstreamOutcome::Json(JsonOutcome {
+            value: json,
+            headers: resp_headers,
+        }))
     } else {
         let err_body = resp
             .json::<serde_json::Value>()
@@ -111,6 +134,7 @@ pub async fn call_upstream(
         Err(ProxyError::Upstream {
             status: status.as_u16(),
             body: err_body,
+            headers: resp_headers,
         })
     }
 }

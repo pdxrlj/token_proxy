@@ -13,6 +13,8 @@ function emptyProvider(): ProviderConfig {
     timeout_secs: 300,
     enabled: true,
     models: [],
+    user_agent: "",
+    headers: {},
   };
 }
 
@@ -22,17 +24,24 @@ export function Providers({ data }: { data: AppData }) {
   const [editing, setEditing] = useState<ProviderConfig | null>(null);
   const [isNew, setIsNew] = useState(false);
   const [modelsText, setModelsText] = useState("");
+  const [headersText, setHeadersText] = useState("");
   const [showKey, setShowKey] = useState<Record<string, boolean>>({});
 
   const openNew = () => {
     setEditing(emptyProvider());
     setModelsText("");
+    setHeadersText("");
     setIsNew(true);
   };
 
   const openEdit = (p: ProviderConfig) => {
     setEditing({ ...p });
     setModelsText(p.models.join("\n"));
+    setHeadersText(
+      p.headers && Object.keys(p.headers).length > 0
+        ? JSON.stringify(p.headers, null, 2)
+        : "",
+    );
     setIsNew(false);
   };
 
@@ -42,7 +51,27 @@ export function Providers({ data }: { data: AppData }) {
       .split("\n")
       .map((s) => s.trim())
       .filter(Boolean);
-    const provider: ProviderConfig = { ...editing, models };
+
+    const rawHeaders = headersText.trim();
+    let headers: Record<string, string> = {};
+    if (rawHeaders) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(rawHeaders);
+      } catch {
+        toast("自定义请求头不是合法的 JSON", "err");
+        return;
+      }
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        toast("自定义请求头需写成 JSON 对象", "err");
+        return;
+      }
+      headers = Object.fromEntries(
+        Object.entries(parsed as Record<string, unknown>).map(([k, v]) => [k, String(v)]),
+      );
+    }
+
+    const provider: ProviderConfig = { ...editing, models, headers };
 
     if (isNew) {
       if (!provider.id) {
@@ -231,6 +260,29 @@ export function Providers({ data }: { data: AppData }) {
               </div>
             </Field>
           </div>
+          <Field
+            label="User-Agent"
+            help="发往该上游的 UA。留空表示跟随客户端；客户端也没带时，使用官方 SDK 形态的默认值"
+          >
+            <input
+              className="input mono"
+              value={editing.user_agent ?? ""}
+              placeholder="跟随客户端"
+              onChange={(e) => setEditing({ ...editing, user_agent: e.target.value })}
+            />
+          </Field>
+          <Field
+            label="自定义请求头"
+            help='JSON 对象，如 {"HTTP-Referer": "https://my.app"}。优先级最高，可覆盖客户端透传过来的同名头'
+          >
+            <textarea
+              className="textarea"
+              rows={3}
+              value={headersText}
+              placeholder={'{\n  "HTTP-Referer": "https://my.app"\n}'}
+              onChange={(e) => setHeadersText(e.target.value)}
+            />
+          </Field>
           <Field label="可用模型" help="每行一个模型名，回车分隔">
             <textarea
               className="textarea"

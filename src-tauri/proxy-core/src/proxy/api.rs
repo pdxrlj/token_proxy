@@ -1,6 +1,7 @@
 use crate::proxy::circuit::CircuitBreaker;
 use crate::proxy::config::{AppConfig, Candidate, ProviderConfig, RouteConfig};
 use crate::proxy::db::{build_finetune_jsonl, spawn_insert, InsertRecord};
+use crate::proxy::headers::apply_upstream_response_headers;
 use crate::proxy::lb;
 use crate::proxy::retry::{backoff_delay, ErrorContext, ProxyError};
 use crate::proxy::state::{AppState, RequestLog};
@@ -9,7 +10,7 @@ use crate::proxy::upstream::{
     UpstreamOutcome,
 };
 use axum::extract::{Path, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -201,7 +202,7 @@ async fn chat_completions(
     }
 
     match result {
-        Ok(UpstreamOutcome::Json(v)) => {
+        Ok(UpstreamOutcome::Json(out)) => {
             state.metrics.inc_total();
             state.metrics.inc_success();
             state
@@ -210,10 +211,12 @@ async fn chat_completions(
             log.status = 200;
             log.latency_ms = started.elapsed().as_millis() as u64;
             log.ttfb_ms = Some(log.latency_ms);
-            let resp_bytes = serde_json::to_vec(&v).map(|b| b.len() as u64).unwrap_or(0);
+            let resp_bytes = serde_json::to_vec(&out.value)
+                .map(|b| b.len() as u64)
+                .unwrap_or(0);
             log.response_bytes = Some(resp_bytes);
             state.metrics.add_bytes(0, resp_bytes);
-            let usage = v.get("usage");
+            let usage = out.value.get("usage");
             log.tokens_out = usage
                 .and_then(|u| u.get("completion_tokens"))
                 .and_then(|t| t.as_u64());
@@ -228,28 +231,34 @@ async fn chat_completions(
             state
                 .metrics
                 .add_tokens(log.tokens_in.unwrap_or(0), log.tokens_out.unwrap_or(0));
-            save_to_db(&state, &log, &body, &v, false);
+            save_to_db(&state, &log, &body, &out.value, false);
             finalize_log(&state, log);
-            (StatusCode::OK, Json(v)).into_response()
+            // 回传上游响应头（x-request-id / 限流余量等），让客户端看到的世界与直连一致
+            let mut res = (StatusCode::OK, Json(out.value)).into_response();
+            apply_upstream_response_headers(&mut res, &out.headers);
+            res
         }
         // 裸 Stream 不应出现在业务层（route_and_call 总会包装成 StreamWithGuard）
         Ok(UpstreamOutcome::Stream(resp)) => {
-            forward_sse(
-                state.clone(),
-                log.provider.clone().unwrap_or_default(),
-                log.model.clone(),
-                resp,
-                log.id.clone(),
-                body.clone(),
-                log.ts,
-                log.model.clone(),
-                log.upstream_model.clone(),
-                log.provider.clone(),
-                log.tokens_in,
-                log.provider_id.clone(),
-                None,
+            let upstream_headers = resp.headers().clone();
+            sse_response(
+                forward_sse(
+                    state.clone(),
+                    log.provider.clone().unwrap_or_default(),
+                    log.model.clone(),
+                    resp,
+                    log.id.clone(),
+                    body.clone(),
+                    log.ts,
+                    log.model.clone(),
+                    log.upstream_model.clone(),
+                    log.provider.clone(),
+                    log.tokens_in,
+                    log.provider_id.clone(),
+                    None,
+                ),
+                &upstream_headers,
             )
-            .into_response()
         }
         Ok(UpstreamOutcome::StreamWithGuard { resp, guard }) => {
             // 流式响应：头部返回即视为成功，流内错误走 error 事件
@@ -273,22 +282,25 @@ async fn chat_completions(
             let log_tokens_in = log.tokens_in;
             let log_provider_id = log.provider_id.clone();
             finalize_log(&state, log);
-            forward_sse(
-                state.clone(),
-                provider_name,
-                model,
-                resp,
-                log_id,
-                req_body,
-                log_ts,
-                log_model,
-                log_upstream_model,
-                log_provider,
-                log_tokens_in,
-                log_provider_id,
-                Some(guard),
+            let upstream_headers = resp.headers().clone();
+            sse_response(
+                forward_sse(
+                    state.clone(),
+                    provider_name,
+                    model,
+                    resp,
+                    log_id,
+                    req_body,
+                    log_ts,
+                    log_model,
+                    log_upstream_model,
+                    log_provider,
+                    log_tokens_in,
+                    log_provider_id,
+                    Some(guard),
+                ),
+                &upstream_headers,
             )
-            .into_response()
         }
         Err(e) => {
             state.metrics.inc_total();
@@ -301,7 +313,12 @@ async fn chat_completions(
             log.ttfb_ms = Some(log.latency_ms);
             log.error = Some(e.to_string());
             finalize_log(&state, log);
-            (e.http_status(), Json(e.openai_error())).into_response()
+            let mut res = (e.http_status(), Json(e.openai_error())).into_response();
+            // 上游错误也回传其响应头：429 的 retry-after、限流余量、x-request-id 等
+            if let Some(h) = e.upstream_headers() {
+                apply_upstream_response_headers(&mut res, h);
+            }
+            res
         }
     }
 }
@@ -356,7 +373,7 @@ async fn fallback_proxy(
     }
 
     match outcome {
-        Ok(UpstreamOutcome::Json(v)) => {
+        Ok(UpstreamOutcome::Json(out)) => {
             state.metrics.inc_total();
             state.metrics.inc_success();
             state
@@ -365,13 +382,20 @@ async fn fallback_proxy(
             log.status = 200;
             log.latency_ms = started.elapsed().as_millis() as u64;
             log.ttfb_ms = Some(log.latency_ms);
-            let resp_bytes = serde_json::to_vec(&v).map(|b| b.len() as u64).unwrap_or(0);
+            let resp_bytes = serde_json::to_vec(&out.value)
+                .map(|b| b.len() as u64)
+                .unwrap_or(0);
             log.response_bytes = Some(resp_bytes);
             state.metrics.add_bytes(0, resp_bytes);
             // 缓存命中检测
-            let cache_hit = v.get("usage").map(|u| detect_cache_hit(u)).unwrap_or(false);
+            let cache_hit = out
+                .value
+                .get("usage")
+                .map(|u| detect_cache_hit(u))
+                .unwrap_or(false);
             log.cache_hit = cache_hit;
-            let cached_tokens = v
+            let cached_tokens = out
+                .value
                 .get("usage")
                 .map(|u| extract_cached_tokens(u))
                 .filter(|val| *val > 0);
@@ -379,9 +403,12 @@ async fn fallback_proxy(
             if cache_hit {
                 state.metrics.inc_cache_hit();
             }
-            save_to_db(&state, &log, &body, &v, false);
+            save_to_db(&state, &log, &body, &out.value, false);
             finalize_log(&state, log);
-            (StatusCode::OK, Json(v)).into_response()
+            // 回传上游响应头（x-request-id / 限流余量等）
+            let mut res = (StatusCode::OK, Json(out.value)).into_response();
+            apply_upstream_response_headers(&mut res, &out.headers);
+            res
         }
         // 裸 Stream 不应出现在业务层（route_and_call 总会包装成 StreamWithGuard）
         Ok(UpstreamOutcome::Stream(resp)) => {
@@ -422,39 +449,43 @@ async fn fallback_proxy(
             let log_provider_id = log.provider_id.clone();
             let req_body = body.clone();
             finalize_log(&state, log);
-            let ct = resp
-                .headers()
+            let upstream_headers = resp.headers().clone();
+            let ct = upstream_headers
                 .get(header::CONTENT_TYPE)
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("text/event-stream")
                 .to_string();
             // SSE 流式：走 forward_sse 以统计字节数和 usage
             if ct.contains("text/event-stream") {
-                return forward_sse(
-                    state.clone(),
-                    provider_name,
-                    model,
-                    resp,
-                    log_id,
-                    req_body,
-                    log_ts,
-                    log_model,
-                    log_upstream_model,
-                    log_provider,
-                    log_tokens_in,
-                    log_provider_id,
-                    Some(guard),
-                )
-                .into_response();
+                return sse_response(
+                    forward_sse(
+                        state.clone(),
+                        provider_name,
+                        model,
+                        resp,
+                        log_id,
+                        req_body,
+                        log_ts,
+                        log_model,
+                        log_upstream_model,
+                        log_provider,
+                        log_tokens_in,
+                        log_provider_id,
+                        Some(guard),
+                    ),
+                    &upstream_headers,
+                );
             }
             // 非 SSE 流：响应体由 axum 直接消费，此处立即归还在途计数
             drop(guard);
-            (
+            let mut res = (
                 StatusCode::OK,
                 [(header::CONTENT_TYPE, ct)],
                 forward_raw(resp),
             )
-                .into_response()
+                .into_response();
+            apply_upstream_response_headers(&mut res, &upstream_headers);
+            res
         }
         Err(e) => {
             state.metrics.inc_total();
@@ -467,9 +498,32 @@ async fn fallback_proxy(
             log.ttfb_ms = Some(log.latency_ms);
             log.error = Some(e.to_string());
             finalize_log(&state, log);
-            (e.http_status(), Json(e.openai_error())).into_response()
+            let mut res = (e.http_status(), Json(e.openai_error())).into_response();
+            // 上游错误也回传其响应头：429 的 retry-after、限流余量、x-request-id 等
+            if let Some(h) = e.upstream_headers() {
+                apply_upstream_response_headers(&mut res, h);
+            }
+            res
         }
     }
+}
+
+/// 把 SSE 流包装为响应，并回传上游响应头。
+///
+/// `content-type` 固定为 `text/event-stream`：SSE 帧由本层重新生成，
+/// 上游声明的值透传过来可能与实际的帧格式不符（如 gzip 之类已被解压）。
+fn sse_response<S, E>(sse: axum::response::sse::Sse<S>, upstream: &HeaderMap) -> Response
+where
+    S: futures_util::Stream<Item = Result<axum::response::sse::Event, E>> + Send + 'static,
+    E: Into<Box<dyn std::error::Error + Send + Sync>> + Send + 'static,
+{
+    let mut res = sse.into_response();
+    apply_upstream_response_headers(&mut res, upstream);
+    res.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/event-stream"),
+    );
+    res
 }
 
 /// 路由上下文：从配置中解析出的负载均衡、重试、熔断配置和候选列表。
@@ -676,7 +730,8 @@ async fn route_and_call(
         let inflight_guard = lb::InFlightGuard::new(state.clone(), &inflight_key);
         let call_started = Instant::now();
 
-        match call_upstream(state, provider, path, body.clone()).await {
+        // 透传客户端请求头：让上游看到的请求与客户端直连时一致
+        match call_upstream(state, provider, path, body.clone(), headers).await {
             Ok(outcome) => {
                 // 成功：记录延迟样本，返回结果
                 breaker.on_success();

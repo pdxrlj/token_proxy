@@ -35,6 +35,12 @@ export const api = {
     isTauri
       ? invoke<string>("export_config")
       : Promise.resolve(JSON.stringify(MOCK_CONFIG, null, 2)),
+  /** 弹出「另存为」对话框，写入用户选择的位置；返回保存路径，用户取消时为 null */
+  exportConfigToFile: (defaultName: string): Promise<string | null> =>
+    isTauri
+      ? invoke<string | null>("export_config_to_file", { defaultName })
+      : // 浏览器预览模式没有原生对话框，退回浏览器下载（位置由浏览器决定）
+        Promise.resolve(downloadJson(JSON.stringify(MOCK_CONFIG, null, 2), defaultName)),
   /** 导入配置 JSON 字符串；后端会校验格式与内容 */
   importConfig: (json: string) =>
     isTauri
@@ -81,6 +87,19 @@ export const api = {
       ? invoke<void>("delete_dataset_record", { id })
       : Promise.resolve(),
 };
+
+/// 触发浏览器下载（仅非 Tauri 预览环境使用）。
+///
+/// 浏览器不告知保存位置，故返回一个说明性文本，避免界面误判为"用户取消"。
+function downloadJson(json: string, fileName: string): string {
+  const url = URL.createObjectURL(new Blob([json], { type: "application/json" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = fileName;
+  a.click();
+  URL.revokeObjectURL(url);
+  return "浏览器默认下载目录（预览模式，非桌面端）";
+}
 
 /** 订阅代理请求日志推送 */
 export function onProxyLog(cb: (log: RequestLog) => void) {

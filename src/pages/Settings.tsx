@@ -4,6 +4,7 @@ import type { LbStrategy, SessionKeySource } from "../lib/types";
 import { api } from "../lib/tauri";
 import { Button, Field, Switch, useToast } from "../components/ui";
 import {
+  Check,
   Download,
   FileCog,
   Flame,
@@ -26,6 +27,7 @@ export function Settings({ data }: { data: AppData }) {
   const [draft, setDraft] = useState(() => JSON.parse(JSON.stringify(config)));
   const [dirty, setDirty] = useState(false);
   const [importSummary, setImportSummary] = useState<string | null>(null);
+  const [exportPath, setExportPath] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const set = (patch: unknown) => {
@@ -57,21 +59,17 @@ export function Settings({ data }: { data: AppData }) {
   };
 
   // ── 配置导入导出 ──
+  // 由用户选择保存位置，导出后在下方回显完整路径（敏感文件，位置必须明确）
   const doExport = async () => {
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
     try {
-      const json = await api.exportConfig();
-      const stamp = new Date()
-        .toISOString()
-        .slice(0, 19)
-        .replace(/[:T]/g, "-");
-      const blob = new Blob([json], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `token-proxy-config-${stamp}.json`;
-      a.click();
-      URL.revokeObjectURL(url);
-      toast("配置已导出为 JSON 文件");
+      const saved = await api.exportConfigToFile(`token-proxy-config-${stamp}.json`);
+      if (saved) {
+        setExportPath(saved);
+        toast("配置已导出");
+      } else {
+        toast("已取消导出");
+      }
     } catch (e) {
       toast(`导出失败：${e}`, "err");
     }
@@ -451,6 +449,32 @@ export function Settings({ data }: { data: AppData }) {
             onChange={onFilePicked}
           />
         </div>
+        <p style={{ color: "var(--text-3)", fontSize: 12, marginTop: 10 }}>
+          点击「导出配置」会弹出保存对话框，由你指定保存位置。
+        </p>
+        {exportPath && (
+          <div
+            style={{
+              marginTop: 10,
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              padding: "10px 12px",
+              background: "var(--bg-2)",
+              borderRadius: 8,
+              fontSize: 12,
+              color: "var(--text-3)",
+            }}
+          >
+            <Check size={14} style={{ color: "var(--green)", flexShrink: 0 }} />
+            <span style={{ fontFamily: "var(--font-mono)", wordBreak: "break-all", flex: 1 }}>
+              已保存到：{exportPath}
+            </span>
+            <Button size="sm" onClick={() => setExportPath(null)} title="隐藏">
+              关闭
+            </Button>
+          </div>
+        )}
         {importSummary && (
           <div
             style={{

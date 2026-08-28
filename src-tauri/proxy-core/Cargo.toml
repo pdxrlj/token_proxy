@@ -6,7 +6,9 @@ description = "OpenAI-compatible LLM proxy core: routing, retry, circuit breaker
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# preserve_order：保持 JSON 字段的原始顺序（改 BTreeMap 为 IndexMap）。
+# 请求体若被重排成字典序，与官方 SDK 发出的字节序列不一致，是上游侧可观测的异常特征。
+serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
@@ -16,6 +18,13 @@ reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "stream",
     "rustls-tls",
+    # gzip/brotli/deflate：reqwest 只有在启用对应 feature 时才声明 accept-encoding，
+    # 缺了该头（或裸 HTTP/1.1）会被上游判定为脚本/非浏览器来源。
+    "gzip",
+    "brotli",
+    "deflate",
+    # http2：主流 LLM 官方 API 均走 HTTP/2（TLS ALPN 协商），协议版本本身即指纹。
+    "http2",
 ] }
 futures-util = "0.3"
 backon = "0.4"

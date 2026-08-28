@@ -265,6 +265,18 @@ pub struct ProviderConfig {
     pub timeout_secs: u64,
     pub enabled: bool,
     pub models: Vec<String>,
+    /// 转发到该上游时使用的 User-Agent。
+    ///
+    /// 为空则表示"跟随客户端"：客户端带了就用客户端的，没带则回落到
+    /// [`headers::DEFAULT_USER_AGENT`](crate::proxy::headers::DEFAULT_USER_AGENT)。
+    #[serde(default)]
+    pub user_agent: String,
+    /// 附加到上游请求的自定义头（键不区分大小写）。
+    ///
+    /// 用于满足特定上游的要求（如某些中转要求 `HTTP-Referer`），
+    /// 也可手工伪装/补齐任意头；优先级高于客户端透传头。
+    #[serde(default)]
+    pub headers: std::collections::BTreeMap<String, String>,
 }
 
 impl ProviderConfig {
@@ -277,6 +289,8 @@ impl ProviderConfig {
             timeout_secs: 300,
             enabled: true,
             models: vec!["gpt-4o".into(), "gpt-4o-mini".into(), "gpt-4.1".into()],
+            user_agent: String::new(),
+            headers: std::collections::BTreeMap::new(),
         }
     }
 

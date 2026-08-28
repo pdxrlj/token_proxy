@@ -51,6 +51,10 @@ export interface ProviderConfig {
   timeout_secs: number;
   enabled: boolean;
   models: string[];
+  /** 转发到该上游时使用的 User-Agent；留空表示跟随客户端 */
+  user_agent?: string;
+  /** 附加到上游请求的自定义头，优先级高于客户端透传头 */
+  headers?: Record<string, string>;
 }
 
 // ─────────────────────────── 路由配置 ───────────────────────────

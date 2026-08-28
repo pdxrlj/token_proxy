@@ -15,6 +15,7 @@ pub mod api;
 pub mod circuit;
 pub mod config;
 pub mod db;
+pub mod headers;
 pub mod lb;
 pub mod retry;
 pub mod state;
