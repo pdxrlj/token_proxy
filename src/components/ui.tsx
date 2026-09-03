@@ -169,7 +169,9 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
 export function fmtTime(ts: number): string {
   const d = new Date(ts);
   const pad = (n: number) => String(n).padStart(2, "0");
-  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(
+    d.getHours(),
+  )}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
 export function fmtDuration(ms: number): string {
