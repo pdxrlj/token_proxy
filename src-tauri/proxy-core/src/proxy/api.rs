@@ -83,7 +83,9 @@ async fn list_models(State(state): State<Arc<AppState>>) -> Json<serde_json::Val
 
 /// 从 Authorization 头中提取 Bearer 令牌
 fn bearer_token(headers: &HeaderMap) -> Option<&str> {
-    let auth = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok())?;
+    let auth = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())?;
     let token = auth.strip_prefix("Bearer ")?.trim();
     if token.is_empty() {
         None
@@ -215,8 +217,19 @@ async fn chat_completions(
                 .map(|b| b.len() as u64)
                 .unwrap_or(0);
             log.response_bytes = Some(resp_bytes);
-            state.metrics.add_bytes(0, resp_bytes);
+            // 统计请求体大小到 bytes_in（之前始终为 0）
+            let req_bytes = serde_json::to_vec(&body)
+                .map(|b| b.len() as u64)
+                .unwrap_or(0);
+            state.metrics.add_bytes(req_bytes, resp_bytes);
             let usage = out.value.get("usage");
+            // 用上游返回的真实 prompt_tokens 覆盖估算值
+            if let Some(pt) = usage
+                .and_then(|u| u.get("prompt_tokens"))
+                .and_then(|t| t.as_u64())
+            {
+                log.tokens_in = Some(pt);
+            }
             log.tokens_out = usage
                 .and_then(|u| u.get("completion_tokens"))
                 .and_then(|t| t.as_u64());
@@ -386,23 +399,35 @@ async fn fallback_proxy(
                 .map(|b| b.len() as u64)
                 .unwrap_or(0);
             log.response_bytes = Some(resp_bytes);
-            state.metrics.add_bytes(0, resp_bytes);
+            // 统计请求体大小到 bytes_in（之前始终为 0）
+            let req_bytes = serde_json::to_vec(&body)
+                .map(|b| b.len() as u64)
+                .unwrap_or(0);
+            state.metrics.add_bytes(req_bytes, resp_bytes);
             // 缓存命中检测
-            let cache_hit = out
-                .value
-                .get("usage")
-                .map(|u| detect_cache_hit(u))
-                .unwrap_or(false);
+            let usage = out.value.get("usage");
+            // 用上游返回的真实 prompt_tokens 覆盖估算值
+            if let Some(pt) = usage
+                .and_then(|u| u.get("prompt_tokens"))
+                .and_then(|t| t.as_u64())
+            {
+                log.tokens_in = Some(pt);
+            }
+            log.tokens_out = usage
+                .and_then(|u| u.get("completion_tokens"))
+                .and_then(|t| t.as_u64());
+            let cache_hit = usage.map(|u| detect_cache_hit(u)).unwrap_or(false);
             log.cache_hit = cache_hit;
-            let cached_tokens = out
-                .value
-                .get("usage")
+            let cached_tokens = usage
                 .map(|u| extract_cached_tokens(u))
                 .filter(|val| *val > 0);
             log.cached_tokens = cached_tokens;
             if cache_hit {
                 state.metrics.inc_cache_hit();
             }
+            state
+                .metrics
+                .add_tokens(log.tokens_in.unwrap_or(0), log.tokens_out.unwrap_or(0));
             save_to_db(&state, &log, &body, &out.value, false);
             finalize_log(&state, log);
             // 回传上游响应头（x-request-id / 限流余量等）
@@ -411,24 +436,22 @@ async fn fallback_proxy(
             res
         }
         // 裸 Stream 不应出现在业务层（route_and_call 总会包装成 StreamWithGuard）
-        Ok(UpstreamOutcome::Stream(resp)) => {
-            forward_sse(
-                state.clone(),
-                log.provider.clone().unwrap_or_default(),
-                log.model.clone(),
-                resp,
-                log.id.clone(),
-                body.clone(),
-                log.ts,
-                log.model.clone(),
-                log.upstream_model.clone(),
-                log.provider.clone(),
-                log.tokens_in,
-                log.provider_id.clone(),
-                None,
-            )
-            .into_response()
-        }
+        Ok(UpstreamOutcome::Stream(resp)) => forward_sse(
+            state.clone(),
+            log.provider.clone().unwrap_or_default(),
+            log.model.clone(),
+            resp,
+            log.id.clone(),
+            body.clone(),
+            log.ts,
+            log.model.clone(),
+            log.upstream_model.clone(),
+            log.provider.clone(),
+            log.tokens_in,
+            log.provider_id.clone(),
+            None,
+        )
+        .into_response(),
         Ok(UpstreamOutcome::StreamWithGuard { resp, guard }) => {
             state.metrics.inc_total();
             state.metrics.inc_success();
@@ -555,11 +578,12 @@ fn resolve_routing_context(
         // - 完全没配这个模型 → 去路由页添加
         // - 配了但渠道被禁用 → 去渠道页启用
         let known_model = cfg.routes.iter().any(|r| r.model == model)
-            || cfg.providers.iter().any(|p| p.models.iter().any(|m| m == model));
+            || cfg
+                .providers
+                .iter()
+                .any(|p| p.models.iter().any(|m| m == model));
         let e = if known_model {
-            ProxyError::RouteNotFound(format!(
-                "{model}（已配置，但对应渠道未启用或路由被禁用）"
-            ))
+            ProxyError::RouteNotFound(format!("{model}（已配置，但对应渠道未启用或路由被禁用）"))
         } else {
             ProxyError::RouteNotFound(model.to_string())
         };

@@ -172,14 +172,23 @@ impl Metrics {
         }
     }
 
-    /// 流式响应结束后回写 response_bytes / tokens_out
-    pub fn update_log_stream_stats(&self, id: &str, response_bytes: u64, tokens_out: Option<u64>) {
+    /// 流式响应结束后回写 response_bytes / tokens_out / tokens_in
+    pub fn update_log_stream_stats(
+        &self,
+        id: &str,
+        response_bytes: u64,
+        tokens_out: Option<u64>,
+        tokens_in: Option<u64>,
+    ) {
         let mut q = self.logs.lock();
         for log in q.iter_mut() {
             if log.id == id {
                 log.response_bytes = Some(response_bytes);
                 if let Some(t) = tokens_out {
                     log.tokens_out = Some(t);
+                }
+                if let Some(t) = tokens_in {
+                    log.tokens_in = Some(t);
                 }
                 break;
             }
@@ -200,6 +209,7 @@ impl Metrics {
             }
         }
     }
+
     pub fn snapshot(&self) -> MetricsSnapshot {
         let total = self.total.load(Ordering::Relaxed);
         let success = self.success.load(Ordering::Relaxed);

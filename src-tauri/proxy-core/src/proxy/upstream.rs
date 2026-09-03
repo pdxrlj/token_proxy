@@ -162,7 +162,7 @@ pub fn forward_sse(
     log_model: String,
     log_upstream_model: Option<String>,
     log_provider: Option<String>,
-    log_tokens_in: Option<u64>,
+    _log_tokens_in: Option<u64>,
     provider_id: Option<String>,
     // 在途计数 guard：随流转移进来，在流结束时归还。
     // 为 `None` 时表示调用方未启用在途计数（如兜底透传路径）。
@@ -277,34 +277,44 @@ pub fn forward_sse(
 
         // 上游流结束（或出错）：无论客户端是否断连，都完成统计写入
         let (input, output) = (*usage.lock()).unwrap_or((0, 0));
+        // 先聚合，得到聚合后的响应体大小，用于 tokens_out 估算和 response_bytes
+        let chunk_vals: Vec<serde_json::Value> = collected
+            .iter()
+            .filter_map(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+            .collect();
+        let agg = crate::proxy::db::aggregate_stream_response(&chunk_vals, &model, *usage.lock());
+        let agg_bytes = serde_json::to_vec(&agg)
+            .map(|b| b.len() as u64)
+            .unwrap_or(bytes_total);
+        // 上游未返回 usage 时，用聚合后响应体大小 / 4 估算 tokens_out
+        // （比用 SSE 原始流字节数 / 4 更准确，排除了协议开销）
         let out_approx = if output == 0 {
-            (bytes_total / 4) as u64
+            (agg_bytes / 4) as u64
         } else {
             output
         };
         state.metrics.add_tokens(input, out_approx);
-        state.metrics.add_bytes(0, bytes_total);
+        // bytes_in：统计请求体大小；bytes_out：用聚合后响应体大小（非 SSE 原始流）
+        let req_bytes = serde_json::to_vec(&req_body)
+            .map(|b| b.len() as u64)
+            .unwrap_or(0);
+        state.metrics.add_bytes(req_bytes, agg_bytes);
         let ct_opt = if cached_tokens > 0 {
             Some(cached_tokens)
         } else {
             None
         };
         // 回写流式统计到对应日志条目（含缓存命中状态）
+        // tokens_in 用上游返回的真实 prompt_tokens 覆盖估算值
+        let real_tokens_in = if input > 0 { Some(input) } else { None };
         state
             .metrics
-            .update_log_stream_stats(&log_id, bytes_total, Some(out_approx));
+            .update_log_stream_stats(&log_id, agg_bytes, Some(out_approx), real_tokens_in);
         state
             .metrics
             .update_log_cache_hit(&log_id, cache_hit, ct_opt);
         // 推送更新后的完整日志到前端（局部刷新字节数、tokens、缓存命中）
         state.emit_log_update(&log_id);
-
-        // 聚合 SSE chunks 并异步写入数据库
-        let chunk_vals: Vec<serde_json::Value> = collected
-            .iter()
-            .filter_map(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-            .collect();
-        let agg = crate::proxy::db::aggregate_stream_response(&chunk_vals, &model, *usage.lock());
         let db_guard = state.db.lock().clone();
         if let Some(db) = db_guard {
             let req_str = serde_json::to_string(&req_body).unwrap_or_default();
@@ -318,7 +328,8 @@ pub fn forward_sse(
                     upstream_model: log_upstream_model,
                     provider: log_provider,
                     stream: true,
-                    tokens_in: log_tokens_in,
+                    // 用上游返回的真实 prompt_tokens 覆盖估算值
+                    tokens_in: real_tokens_in,
                     tokens_out: Some(out_approx),
                     cache_hit,
                     cached_tokens: ct_opt,

@@ -280,7 +280,10 @@ pub fn aggregate_stream_response(
     usage: Option<(u64, u64)>,
 ) -> serde_json::Value {
     let mut content = String::new();
-    let mut tool_calls: Vec<serde_json::Value> = Vec::new();
+    // tool_calls 按 index 合并：每个 delta 只包含增量片段（function.name / function.arguments 片段），
+    // 需要按 tool_call.index 拼接，而非把每个 delta 当作独立 tool_call。
+    let mut tool_calls: std::collections::BTreeMap<u64, serde_json::Value> =
+        std::collections::BTreeMap::new();
 
     for chunk in chunks {
         if let Some(delta) = chunk
@@ -291,8 +294,56 @@ pub fn aggregate_stream_response(
             if let Some(t) = delta.get("content").and_then(|c| c.as_str()) {
                 content.push_str(t);
             }
-            if let Some(tc) = delta.get("tool_calls").and_then(|t| t.as_array()) {
-                tool_calls.extend_from_slice(tc);
+            if let Some(tc_arr) = delta.get("tool_calls").and_then(|t| t.as_array()) {
+                for tc in tc_arr {
+                    let idx = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0);
+                    let entry = tool_calls.entry(idx).or_insert_with(|| {
+                        serde_json::json!({
+                            "id": tc.get("id").cloned().unwrap_or(serde_json::Value::Null),
+                            "type": "function",
+                            "function": {
+                                "name": String::new(),
+                                "arguments": String::new(),
+                            }
+                        })
+                    });
+                    // 合并 id（首个 delta 携带）
+                    if let Some(id) = tc.get("id").and_then(|v| v.as_str()) {
+                        if !id.is_empty() {
+                            entry["id"] = serde_json::Value::String(id.to_string());
+                        }
+                    }
+                    // 合并 function.name（首个 delta 携带完整名称）
+                    if let Some(name) = tc
+                        .get("function")
+                        .and_then(|f| f.get("name"))
+                        .and_then(|n| n.as_str())
+                    {
+                        if !name.is_empty() {
+                            entry["function"]["name"] = serde_json::Value::String(name.to_string());
+                        }
+                    }
+                    // 拼接 function.arguments 片段
+                    if let Some(args) = tc
+                        .get("function")
+                        .and_then(|f| f.get("arguments"))
+                        .and_then(|a| a.as_str())
+                    {
+                        if let Some(existing) = entry
+                            .get("function")
+                            .and_then(|f| f.get("arguments"))
+                            .and_then(|a| a.as_str())
+                        {
+                            let mut combined = String::with_capacity(existing.len() + args.len());
+                            combined.push_str(existing);
+                            combined.push_str(args);
+                            entry["function"]["arguments"] = serde_json::Value::String(combined);
+                        } else {
+                            entry["function"]["arguments"] =
+                                serde_json::Value::String(args.to_string());
+                        }
+                    }
+                }
             }
         }
     }
@@ -302,8 +353,28 @@ pub fn aggregate_stream_response(
         "content": if content.is_empty() { serde_json::Value::Null } else { serde_json::json!(content) },
     });
     if !tool_calls.is_empty() {
-        message["tool_calls"] = serde_json::Value::Array(tool_calls);
+        message["tool_calls"] = serde_json::Value::Array(tool_calls.into_values().collect());
     }
+
+    // 从最后一个 chunk 提取 finish_reason（stop / tool_calls / length 等），
+    // 缺省时根据是否有 tool_calls 推断
+    let finish_reason = chunks
+        .iter()
+        .rev()
+        .find_map(|c| {
+            c.get("choices")
+                .and_then(|ch| ch.get(0))
+                .and_then(|c| c.get("finish_reason"))
+                .and_then(|f| f.as_str())
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_else(|| {
+            if message.get("tool_calls").is_some() {
+                "tool_calls".to_string()
+            } else {
+                "stop".to_string()
+            }
+        });
 
     let mut response = serde_json::json!({
         "id": format!("chatcmpl-{}", uuid::Uuid::new_v4()),
@@ -312,7 +383,7 @@ pub fn aggregate_stream_response(
         "choices": [{
             "index": 0,
             "message": message,
-            "finish_reason": "stop"
+            "finish_reason": finish_reason
         }],
     });
 
