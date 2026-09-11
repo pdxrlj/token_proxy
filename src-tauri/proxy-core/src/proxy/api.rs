@@ -267,7 +267,7 @@ async fn chat_completions(
                     log.upstream_model.clone(),
                     log.provider.clone(),
                     log.tokens_in,
-                    log.provider_id.clone(),
+                    None,
                     None,
                 ),
                 &upstream_headers,
@@ -293,7 +293,8 @@ async fn chat_completions(
             let log_upstream_model = log.upstream_model.clone();
             let log_provider = log.provider.clone();
             let log_tokens_in = log.tokens_in;
-            let log_provider_id = log.provider_id.clone();
+            // 断流记熔断失败用的 route_key：从在途 guard 透传（与 route_and_call 一致）
+            let inflight_key = guard.key().to_string();
             finalize_log(&state, log);
             let upstream_headers = resp.headers().clone();
             sse_response(
@@ -309,7 +310,7 @@ async fn chat_completions(
                     log_upstream_model,
                     log_provider,
                     log_tokens_in,
-                    log_provider_id,
+                    Some(inflight_key),
                     Some(guard),
                 ),
                 &upstream_headers,
@@ -448,7 +449,7 @@ async fn fallback_proxy(
             log.upstream_model.clone(),
             log.provider.clone(),
             log.tokens_in,
-            log.provider_id.clone(),
+            None,
             None,
         )
         .into_response(),
@@ -469,7 +470,8 @@ async fn fallback_proxy(
             let log_upstream_model = log.upstream_model.clone();
             let log_provider = log.provider.clone();
             let log_tokens_in = log.tokens_in;
-            let log_provider_id = log.provider_id.clone();
+            // 断流记熔断失败用的 route_key：从在途 guard 透传（与 route_and_call 一致）
+            let inflight_key = guard.key().to_string();
             let req_body = body.clone();
             finalize_log(&state, log);
             let upstream_headers = resp.headers().clone();
@@ -493,7 +495,7 @@ async fn fallback_proxy(
                         log_upstream_model,
                         log_provider,
                         log_tokens_in,
-                        log_provider_id,
+                        Some(inflight_key),
                         Some(guard),
                     ),
                     &upstream_headers,
@@ -591,6 +593,7 @@ fn resolve_routing_context(
     }
 
     let lb_cfg = cfg.load_balance.clone();
+    let breaker_cfg = cfg.retry.circuit_breaker.clone();
 
     // 提取会话 Key（用于粘性路由）
     let session_key = if lb_cfg.sticky.enabled {
@@ -599,9 +602,39 @@ fn resolve_routing_context(
         None
     };
 
-    // 负载均衡选择（在 read lock 内完成，因为 select 需要引用候选）
-    let selected_idx = if lb_cfg.enabled && candidates.len() > 1 {
-        lb::select(state, &candidates, model, session_key.as_deref(), &lb_cfg).unwrap_or(0)
+    // eligible 子集：过滤掉熔断中的候选（保留 CLOSED / HALF_OPEN / OPEN-已到期）。
+    // 熔断未启用时不过滤。全部候选熔断时子集为空——从首个候选起轮转，
+    // 在 route_and_call 的 Panic 分支统一处理（最早熔断者限速放行）。
+    let eligible: Vec<usize> = if breaker_cfg.enabled {
+        candidates
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| {
+                let key = lb::route_key_for_candidate(model, c);
+                state
+                    .breakers
+                    .get(&key)
+                    .map(|b| b.is_eligible(&breaker_cfg))
+                    .unwrap_or(true)
+            })
+            .map(|(i, _)| i)
+            .collect()
+    } else {
+        (0..candidates.len()).collect()
+    };
+
+    // 负载均衡选择（在 read lock 内完成，因为 select 需要引用候选）；
+    // 选择范围限定在 eligible 子集上，选中者保证未被熔断拦截
+    let selected_idx = if lb_cfg.enabled && candidates.len() > 1 && !eligible.is_empty() {
+        lb::select(
+            state,
+            &candidates,
+            model,
+            session_key.as_deref(),
+            &lb_cfg,
+            Some(&eligible),
+        )
+        .unwrap_or(eligible[0])
     } else {
         0
     };
@@ -667,6 +700,9 @@ async fn route_and_call(
     // 默认 max_retries=3 时，最坏情况每候选 4 次尝试 × N 个候选，
     // 叠加指数退避可达数分钟，远超客户端超时，全部工作都会白费。
     let deadline = Instant::now() + Duration::from_secs(TOTAL_REQUEST_TIMEOUT_SECS);
+    // Panic 放行标记：本轮请求是"全部候选熔断"后的限速试探，
+    // 跳过熔断检查直接调用（结果仍上报熔断器驱动状态转换）
+    let mut panic_bypass = false;
 
     // 收集"最后一次失败"的上下文，用于出错时生成结构化错误详情。
     // 每次进入候选时更新，因此最终保留的是失败发生的那个候选的信息。
@@ -707,7 +743,7 @@ async fn route_and_call(
         let breaker = state
             .breakers
             .entry(inflight_key.clone())
-            .or_insert_with(|| Arc::new(CircuitBreaker::new(breaker_cfg.clone())))
+            .or_insert_with(|| Arc::new(CircuitBreaker::new()))
             .clone();
 
         // 更新当前候选的错误上下文（熔断状态需在此处采样）
@@ -729,7 +765,8 @@ async fn route_and_call(
         };
 
         // ── 2. 熔断检查：打开时 failover 到下一候选 ──
-        if breaker_cfg.enabled && breaker.before_request().is_err() {
+        // panic_bypass：本轮是 Panic 试探（已抢占窗口名额），跳过检查直接放行
+        if breaker_cfg.enabled && !panic_bypass && breaker.before_request(&breaker_cfg).is_err() {
             if candidates_tried < total_candidates {
                 warn!(
                     provider = %provider.id,
@@ -741,12 +778,37 @@ async fn route_and_call(
                 attempt = 0;
                 continue;
             }
-            return fail(
-                ProxyError::CircuitOpen(provider.name.clone()),
-                &last_ctx,
-                log,
-            );
+            // 全部候选均已熔断 → Panic 模式：让"最早熔断"的渠道按窗口限速
+            // 放行真实请求作为试探。既避免单次偶发 503 把唯一渠道硬拒整个
+            // 熔断时长，试探频率又受窗口约束，不会打死尚未恢复的上游。
+            match claim_panic_probe(
+                state,
+                model,
+                &candidates,
+                breaker_cfg.panic_probe_window_secs,
+            ) {
+                Some(idx) => {
+                    warn!(
+                        provider = %candidates[idx].0.id,
+                        model = %model,
+                        window_secs = breaker_cfg.panic_probe_window_secs,
+                        "all candidates circuit-open, panic probe admitted"
+                    );
+                    current_idx = idx;
+                    panic_bypass = true;
+                    continue;
+                }
+                None => {
+                    return fail(
+                        ProxyError::CircuitOpen(provider.name.clone()),
+                        &last_ctx,
+                        log,
+                    );
+                }
+            }
         }
+        // Panic 放行仅对单次调用生效；后续重试 / 再进入仍要走熔断检查
+        panic_bypass = false;
 
         // ── 3. 在途计数 + 调用上游 ──
         // guard 在构造时 inc_in_flight，析构时自动归还，
@@ -758,7 +820,7 @@ async fn route_and_call(
         match call_upstream(state, provider, path, body.clone(), headers).await {
             Ok(outcome) => {
                 // 成功：记录延迟样本，返回结果
-                breaker.on_success();
+                breaker.on_success(&breaker_cfg);
                 let latency_ms = call_started.elapsed().as_millis() as u64;
                 lb::record_latency(state, &inflight_key, latency_ms);
 
@@ -791,15 +853,40 @@ async fn route_and_call(
                 log.retries = attempt;
                 return Ok(outcome);
             }
+            Err(e) if e.is_503() => {
+                // ── 503 专用分支（优先于一切重试判定，与 retry_statuses 无关）──
+                // 上游明确表示"服务不可用"：立即跳闸熔断 + 跳过同渠道退避重试，
+                // 直接 failover 到下一候选。重试一个正在 503 的上游大概率
+                // 只是白等退避时间，还会放大其压力。
+                if breaker_cfg.enabled {
+                    breaker.trip_now();
+                }
+                drop(inflight_guard);
+                if candidates_tried < total_candidates && Instant::now() < deadline {
+                    warn!(
+                        provider = %provider.id,
+                        model = %model,
+                        "upstream 503, circuit tripped immediately, failing over"
+                    );
+                    current_idx = (current_idx + 1) % total_candidates;
+                    candidates_tried += 1;
+                    attempt = 0;
+                    continue;
+                }
+                let mut ctx = last_ctx.clone();
+                ctx.candidates_tried = Some(candidates_tried);
+                ctx.retries = Some(attempt);
+                return fail(e, &ctx, log);
+            }
             Err(e) if e.retriable(&retry_cfg) && attempt < retry_cfg.max_retries => {
                 // 可重试错误：退避后重试（同一候选，保持上下文）
                 if breaker_cfg.enabled {
-                    breaker.on_failure();
+                    breaker.on_failure(&breaker_cfg);
                 }
                 drop(inflight_guard);
 
                 // 全局 deadline 检查：退避后可能已超时，此时再重试毫无意义
-                let delay = backoff_delay(attempt + 1, &retry_cfg);
+                let delay = backoff_delay(attempt + 1);
                 if Instant::now() + delay > deadline {
                     warn!(
                         provider = %provider.id,
@@ -833,7 +920,7 @@ async fn route_and_call(
             Err(e) => {
                 // 不可重试或重试耗尽：failover 到下一候选
                 if breaker_cfg.enabled {
-                    breaker.on_failure();
+                    breaker.on_failure(&breaker_cfg);
                 }
                 drop(inflight_guard);
                 if candidates_tried < total_candidates && Instant::now() < deadline {
@@ -891,7 +978,42 @@ fn cooldown_remaining_secs(
     if !cfg.enabled {
         return None;
     }
-    breaker.cooldown_remaining_secs()
+    breaker.cooldown_remaining_secs(cfg)
+}
+
+/// Panic 模式试探：在全部候选中找"最早熔断"的 OPEN 渠道并抢占窗口名额。
+///
+/// 返回 `Some(idx)` 表示抢占成功——调用方应把该候选放行一次真实请求，
+/// 其结果照常通过 `on_success` / `on_failure` / `trip_now` 上报熔断器，
+/// 驱动 OPEN → HALF_OPEN → CLOSED 的恢复流程。
+/// 返回 `None` 表示无熔断候选可用，或窗口限速拒绝了本次试探。
+fn claim_panic_probe(
+    state: &Arc<AppState>,
+    model: &str,
+    candidates: &[(ProviderConfig, Option<RouteConfig>)],
+    window_secs: u64,
+) -> Option<usize> {
+    // (opened_at, 候选索引, 熔断器)：最早熔断者胜出
+    let mut earliest: Option<(Instant, usize, Arc<CircuitBreaker>)> = None;
+    for (i, (p, r)) in candidates.iter().enumerate() {
+        let upstream_model = r.as_ref().map(|r| r.upstream_model.as_str()).unwrap_or("");
+        let key = lb::route_key(model, &p.id, upstream_model);
+        let Some(b) = state.breakers.get(&key) else {
+            continue;
+        };
+        // 只考虑 OPEN 状态：HALF_OPEN 候选本就可参与正常选择（is_eligible）
+        if b.status().state != crate::proxy::circuit::BreakerState::Open {
+            continue;
+        }
+        let Some(at) = b.opened_at() else {
+            continue;
+        };
+        if earliest.as_ref().map(|(t, _, _)| at < *t).unwrap_or(true) {
+            earliest = Some((at, i, b.clone()));
+        }
+    }
+    let (_, idx, breaker) = earliest?;
+    breaker.try_claim_panic_probe(window_secs).then_some(idx)
 }
 
 /// 路由参数改写：`upstream_model` 覆盖 `model` 字段，`route.overrides` 覆盖其余字段。

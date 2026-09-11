@@ -312,7 +312,7 @@ async fn smoke_full_chain() {
     {
         let mut cfg = state4.config.write();
         cfg.retry.circuit_breaker.failure_threshold = 4;
-        cfg.retry.circuit_breaker.cooldown_secs = 60;
+        cfg.retry.circuit_breaker.open_duration_secs = 60;
     }
     let mut body = chat_body(false);
     body["x_mock_fail"] = json!(500);
@@ -325,23 +325,18 @@ async fn smoke_full_chain() {
         .unwrap();
     assert_eq!(resp.status(), 500);
     assert_eq!(mock_counter4.load(Ordering::SeqCst), 4);
-    // 第 2 次请求：熔断打开 → 立即 503，不再打到上游
-    {
-        // 熔断器按 route 维度隔离，key = `model|provider|upstream_model`
-        let b = state4
+    // 熔断器按 route 维度隔离，key = `model|provider|upstream_model`，已跳闸
+    assert_eq!(
+        state4
             .breakers
             .get(&lb::route_key("mock-model", "mock", ""))
-            .expect("breaker exists");
-        let st = b.status();
-        eprintln!(
-            "DEBUG breaker state={:?} failures={}",
-            st.state, st.consecutive_failures
-        );
-        eprintln!(
-            "DEBUG cfg enabled={}",
-            state4.config.read().retry.circuit_breaker.enabled
-        );
-    }
+            .expect("breaker exists")
+            .status()
+            .state,
+        crate::proxy::circuit::BreakerState::Open
+    );
+    // 第 2 次请求：单候选已熔断 → Panic 模式窗口放行 1 次真实试探（打到上游
+    // 得 500），其重试在窗口内被拒绝 → 最终以 CircuitOpen 503 结束
     let resp = client
         .post("http://127.0.0.1:8794/v1/chat/completions")
         .json(&body)
@@ -351,8 +346,8 @@ async fn smoke_full_chain() {
     assert_eq!(resp.status(), 503);
     assert_eq!(
         mock_counter4.load(Ordering::SeqCst),
-        4,
-        "no more upstream calls"
+        5,
+        "panic window admits exactly 1 real request"
     );
     let err: Value = resp.json().await.unwrap();
     assert_eq!(err["error"]["type"], "circuit_open");

@@ -131,6 +131,28 @@ pub fn validate(cfg: &AppConfig) -> Result<(), String> {
             return Err(format!("路由 '{}' 的 weight 过大（上限 1000000）", r.model));
         }
     }
+
+    // ── 重试与熔断参数边界 ──
+    if cfg.retry.max_retries > 10 {
+        return Err("最大重试次数不能超过 10".into());
+    }
+    let cb = &cfg.retry.circuit_breaker;
+    if cb.failure_threshold == 0 || cb.failure_threshold > 100 {
+        return Err("熔断失败阈值必须在 1-100 之间".into());
+    }
+    // 0 合法：表示熔断后立即转半开试探（快速恢复场景）
+    if cb.open_duration_secs > 7 * 86400 {
+        return Err("熔断时长（秒）不能超过 7 天（604800）".into());
+    }
+    if cb.probe_interval_secs == 0 || cb.probe_interval_secs > 3600 {
+        return Err("探活间隔（秒）必须在 1-3600 之间".into());
+    }
+    if cb.recovery_success_threshold == 0 || cb.recovery_success_threshold > 10 {
+        return Err("恢复所需连续成功次数必须在 1-10 之间".into());
+    }
+    if cb.panic_probe_window_secs > 3600 {
+        return Err("Panic 试探窗口（秒）不能超过 3600".into());
+    }
     Ok(())
 }
 

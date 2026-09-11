@@ -229,30 +229,92 @@ fn get_metrics(
 
 #[tauri::command]
 fn reset_breaker(state: tauri::State<Arc<AppState>>, provider_id: String) -> Result<(), String> {
-    if let Some(b) = state.breakers.get(&provider_id) {
-        b.reset();
+    // 熔断器按 route 维度隔离，key = `{model}|{provider_id}|{upstream_model}`；
+    // 重置某渠道 = 重置其名下全部路由熔断器（立即恢复全量流量，不触发慢启动）
+    for entry in state.breakers.iter() {
+        if is_route_of_provider(entry.key(), &provider_id) {
+            entry.value().reset();
+        }
     }
     Ok(())
 }
 
+/// 判断 route_key（`model|provider_id|upstream_model`）是否属于指定 provider。
+///
+/// provider id 不含 `|` 且为 key 的第 2 段；model 含 `|` 的极端情况下
+/// 会导致误判失败（重置不到），但不会误伤其它渠道。
+fn is_route_of_provider(route_key: &str, provider_id: &str) -> bool {
+    let mut parts = route_key.splitn(3, '|');
+    parts.next(); // model
+    parts.next() == Some(provider_id)
+}
+
 #[tauri::command]
 fn get_breaker_status(state: tauri::State<Arc<AppState>>) -> Result<serde_json::Value, String> {
-    let mut map = serde_json::Map::new();
+    // route 级熔断器按 provider 聚合展示：状态取最差（Open > HalfOpen > Closed），
+    // 连续失败取最大值。key 仍为 provider_id，与旧版前端接口兼容。
+    use std::collections::HashMap;
+    use token_proxy_core::proxy::circuit::BreakerState;
+
+    let cb_cfg = state.config.read().retry.circuit_breaker.clone();
+    let mut per_provider: HashMap<String, (u8, u32)> = HashMap::new();
     for entry in state.breakers.iter() {
+        let Some(pid) = route_key_provider(entry.key()) else {
+            continue;
+        };
         let s = entry.value().status();
+        let rank = match s.state {
+            BreakerState::Closed => 0u8,
+            BreakerState::HalfOpen => 1,
+            BreakerState::Open => 2,
+        };
+        let e = per_provider.entry(pid.to_string()).or_insert((0, 0));
+        if rank > e.0 {
+            e.0 = rank;
+        }
+        e.1 = e.1.max(s.consecutive_failures);
+    }
+
+    let mut map = serde_json::Map::new();
+    for (pid, (rank, failures)) in per_provider {
+        // 熔断中（open）给出最长剩余冷却秒数，供前端告警栏倒计时
+        let cooldown = if rank == 2 {
+            state
+                .breakers
+                .iter()
+                .filter(|e| route_key_provider(e.key()) == Some(pid.as_str()))
+                .filter_map(|e| e.value().cooldown_remaining_secs(&cb_cfg))
+                .filter(|s| *s > 0)
+                .min()
+        } else {
+            None
+        };
         map.insert(
-            entry.key().clone(),
+            pid,
             serde_json::json!({
-                "state": match s.state {
-                    token_proxy_core::proxy::circuit::BreakerState::Closed => "closed",
-                    token_proxy_core::proxy::circuit::BreakerState::Open => "open",
-                    token_proxy_core::proxy::circuit::BreakerState::HalfOpen => "half_open",
+                "state": match rank {
+                    2 => "open",
+                    1 => "half_open",
+                    _ => "closed",
                 },
-                "consecutive_failures": s.consecutive_failures,
+                "consecutive_failures": failures,
+                "cooldown_remaining_secs": cooldown,
             }),
         );
     }
     Ok(serde_json::Value::Object(map))
+}
+
+/// 从 route_key 中提取 provider_id（第 2 段）；格式不合法时返回 None。
+fn route_key_provider(route_key: &str) -> Option<&str> {
+    let mut parts = route_key.splitn(3, '|');
+    parts.next()?; // model
+    let pid = parts.next()?;
+    if pid.is_empty() {
+        None
+    } else {
+        Some(pid)
+    }
 }
 
 #[tauri::command]

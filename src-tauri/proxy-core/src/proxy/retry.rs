@@ -1,7 +1,13 @@
-use crate::proxy::config::RetryConfig;
 use axum::http::{HeaderMap, StatusCode};
 use serde::Serialize;
 use thiserror::Error;
+
+// ─────────────────────────── 重试内部固定参数（不暴露配置） ───────────────────────────
+
+/// 指数退避基数（毫秒）：delay(attempt) = min(BASE × 2^(attempt-1), MAX)
+pub const RETRY_BACKOFF_BASE_MS: u64 = 500;
+/// 退避上限（毫秒）：500ms → 1s → 2s → 4s → 8s 封顶
+pub const RETRY_BACKOFF_MAX_MS: u64 = 8000;
 
 /// 代理层统一错误
 #[derive(Debug, Error)]
@@ -93,11 +99,23 @@ pub struct ErrorDetail {
 }
 
 impl ProxyError {
-    /// 该错误是否值得重试（只对"重试可能成功"的失败重试）
-    pub fn retriable(&self, cfg: &RetryConfig) -> bool {
+    /// 上游 503：由熔断器接管（单次立即跳闸 + 换渠道），不走同渠道退避重试。
+    ///
+    /// 与 `retry_statuses` 无关——列表里有没有 503 都不影响该判定，
+    /// 错误处理流程中 503 分支优先于任何重试判断。
+    pub fn is_503(&self) -> bool {
+        matches!(self, ProxyError::Upstream { status: 503, .. })
+    }
+
+    /// 该错误是否值得**同渠道退避重试**（只对"重试可能成功"的失败重试）。
+    ///
+    /// - 上游状态码：在 `retry_statuses` 列表中（503 在错误处理流程中被熔断分支
+    ///   先行接管，无论列表是否包含 503 都不会走到同渠道重试）
+    /// - 网络错误/超时：始终重试（内部固定语义，不可配置）
+    pub fn retriable(&self, cfg: &crate::proxy::config::RetryConfig) -> bool {
         match self {
             ProxyError::Upstream { status, .. } => cfg.retry_statuses.contains(status),
-            ProxyError::Network(_) | ProxyError::Timeout(_) => cfg.retry_on_network_error,
+            ProxyError::Network(_) | ProxyError::Timeout(_) => true,
             _ => false,
         }
     }
@@ -158,37 +176,37 @@ impl ProxyError {
                 401 | 403 => "上游拒绝了鉴权：请检查该渠道的 API Key 是否正确或已过期。".into(),
                 404 => "上游不存在该模型或端点：请检查路由配置的模型名与上游模型名。".into(),
                 429 => "上游限流：可降低请求频率，或为该模型配置更多渠道分流。".into(),
-                500..=599 => "上游服务异常：通常会自动重试并切换到其它渠道，若持续出现请检查上游状态。".into(),
+                500..=599 => {
+                    "上游服务异常：通常会自动重试并切换到其它渠道，若持续出现请检查上游状态。"
+                        .into()
+                }
                 _ => "请求被上游拒绝：请检查请求参数是否符合该上游的要求。".into(),
             },
             ProxyError::CircuitOpen(_) => {
-                "该渠道连续失败次数过多已被暂时隔离，冷却结束后会自动恢复。\
-                 若所有渠道都熔断，请检查网络连通性与各渠道的 API Key。"
+                "该渠道已被熔断隔离（默认 1 小时），期间新请求会自动切换到其它可用渠道；\
+                 冷却结束后自动探活，连续成功后逐步恢复全部流量。\
+                 若所有渠道均熔断，代理会按 Panic 模式限速放行试探请求，不会无限拒绝。\
+                 可在「渠道」页手动重置熔断器。"
                     .into()
             }
             ProxyError::Network(_) => {
-                "请检查网络连通性、代理设置，以及渠道 base_url 是否填写正确。"
-                    .into()
+                "请检查网络连通性、代理设置，以及渠道 base_url 是否填写正确。".into()
             }
-            ProxyError::Timeout(_) => {
-                "上游响应过慢或单个请求的总耗时超出上限。\
+            ProxyError::Timeout(_) => "上游响应过慢或单个请求的总耗时超出上限。\
                  可尝试调大渠道超时时间，或改用响应更快的渠道。"
-                    .into()
-            }
+                .into(),
             ProxyError::RouteNotFound(_) => {
-                "请到「路由」页为该模型添加路由，或确认渠道已启用且模型列表中包含该模型。"
-                    .into()
+                "请到「路由」页为该模型添加路由，或确认渠道已启用且模型列表中包含该模型。".into()
             }
-            ProxyError::BadRequest(_) => "请检查请求体是否符合 OpenAI API 格式（model 字段必填）。".into(),
+            ProxyError::BadRequest(_) => {
+                "请检查请求体是否符合 OpenAI API 格式（model 字段必填）。".into()
+            }
             ProxyError::Unauthorized => {
-                "请在设置中填写与本地访问令牌一致的 Authorization: Bearer <token>。"
-                    .into()
+                "请在设置中填写与本地访问令牌一致的 Authorization: Bearer <token>。".into()
             }
-            ProxyError::QuotaExceeded(_, _) => {
-                "该用户的请求次数已用尽。\
+            ProxyError::QuotaExceeded(_, _) => "该用户的请求次数已用尽。\
                  可到「用户管理」页调高上限，或重置该用户的已用次数。"
-                    .into()
-            }
+                .into(),
             ProxyError::Io(_) => "请查看应用日志获取详细信息。".into(),
         })
     }
@@ -320,23 +338,20 @@ fn format_upstream_body(body: &serde_json::Value) -> String {
     }
 }
 
-/// 指数退避 + 抖动（毫秒）。attempt 从 1 开始。
-pub fn backoff_delay(attempt: u32, cfg: &RetryConfig) -> std::time::Duration {
-    let base = cfg.base_delay_ms.max(50);
-    let exp = base.saturating_mul(1u64 << attempt.saturating_sub(1).min(6));
-    let capped = exp.min(cfg.max_delay_ms.max(base));
-    // 确定性抖动，避免惊群
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
-    let jitter = (nanos % 120) as u64;
-    std::time::Duration::from_millis(capped + jitter)
+/// 指数退避（毫秒）。attempt 从 1 开始。
+///
+/// `delay = min(RETRY_BACKOFF_BASE_MS × 2^(attempt-1), RETRY_BACKOFF_MAX_MS)`
+/// → 500ms → 1s → 2s → 4s → 8s 封顶。
+/// 基数与上限为内部固定参数，不对外暴露配置；重试本身低频，无抖动。
+pub fn backoff_delay(attempt: u32) -> std::time::Duration {
+    let exp = RETRY_BACKOFF_BASE_MS.saturating_mul(1u64 << attempt.saturating_sub(1).min(4));
+    std::time::Duration::from_millis(exp.min(RETRY_BACKOFF_MAX_MS))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proxy::config::RetryConfig;
 
     #[test]
     fn retry_semantics() {
@@ -347,7 +362,10 @@ mod tests {
             headers: HeaderMap::new(),
         }
         .retriable(&cfg));
-        assert!(ProxyError::Upstream {
+        // 503 不在默认列表中 → retriable() 为 false。
+        // 语义澄清：503 由错误处理流程的熔断分支（is_503）先行接管，
+        // 无论列表是否包含 503，都轮不到 retriable() 判定同渠道重试。
+        assert!(!ProxyError::Upstream {
             status: 503,
             body: serde_json::json!({}),
             headers: HeaderMap::new(),
@@ -362,6 +380,25 @@ mod tests {
         assert!(ProxyError::Network("boom".into()).retriable(&cfg));
         assert!(!ProxyError::RouteNotFound("x".into()).retriable(&cfg));
         assert!(!ProxyError::Unauthorized.retriable(&cfg));
+    }
+
+    #[test]
+    fn is_503_standalone_detection() {
+        // 503 判定独立于 retry_statuses：只看状态码本身
+        assert!(ProxyError::Upstream {
+            status: 503,
+            body: serde_json::json!({}),
+            headers: HeaderMap::new(),
+        }
+        .is_503());
+        assert!(!ProxyError::Upstream {
+            status: 500,
+            body: serde_json::json!({}),
+            headers: HeaderMap::new(),
+        }
+        .is_503());
+        assert!(!ProxyError::Network("conn refused".into()).is_503());
+        assert!(!ProxyError::Timeout("slow".into()).is_503());
     }
 
     #[test]
@@ -432,13 +469,13 @@ mod tests {
     }
 
     #[test]
-    fn backoff_grows() {
-        let cfg = RetryConfig::default();
-        let d1 = backoff_delay(1, &cfg).as_millis();
-        let d2 = backoff_delay(2, &cfg).as_millis();
-        let d3 = backoff_delay(3, &cfg).as_millis();
-        assert!(d2 >= d1);
-        assert!(d3 >= d2);
-        assert!(d3 as u64 <= cfg.max_delay_ms + 120);
+    fn backoff_sequence_capped() {
+        // 固定指数退避：500ms → 1s → 2s → 4s → 8s 封顶，无抖动
+        assert_eq!(backoff_delay(1).as_millis(), 500);
+        assert_eq!(backoff_delay(2).as_millis(), 1000);
+        assert_eq!(backoff_delay(3).as_millis(), 2000);
+        assert_eq!(backoff_delay(4).as_millis(), 4000);
+        assert_eq!(backoff_delay(5).as_millis(), 8000);
+        assert_eq!(backoff_delay(9).as_millis(), 8000, "8s 封顶");
     }
 }

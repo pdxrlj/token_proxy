@@ -3,10 +3,11 @@
 //! # 模块结构
 //! - [`config`]  — 配置类型与路由解析
 //! - [`api`]      — HTTP 处理器与请求路由
-//! - [`lb`]       — 负载均衡选择器（多上游 + 粘性会话）
+//! - [`lb`]       — 负载均衡选择器（SWRR / 慢启动 / 粘性会话）
 //! - [`upstream`] — 上游调用与 SSE 流转发
 //! - [`retry`]    — 重试退避与错误类型
-//! - [`circuit`]  — 熔断器
+//! - [`circuit`]  — 熔断器（503 立即跳闸 / 半开恢复 / Panic 模式）
+//! - [`probe`]    — 主动探活任务（熔断到期后自动试探上游）
 //! - [`state`]    — 全局共享状态与指标
 //! - [`store`]    — 配置持久化与校验
 //! - [`db`]       — SQLite 请求日志存储
@@ -17,6 +18,7 @@ pub mod config;
 pub mod db;
 pub mod headers;
 pub mod lb;
+pub mod probe;
 pub mod retry;
 pub mod state;
 pub mod store;
@@ -44,15 +46,17 @@ pub async fn serve(state: Arc<AppState>) -> Result<(), Box<dyn std::error::Error
         let cfg = state.config.read();
         (cfg.server.host.clone(), cfg.server.port)
     };
-    // 启动 sticky 会话清理后台任务（TTL 动态读取，随配置热重载生效）
+    // 启动 sticky 会话清理与熔断探活后台任务（TTL / 探活间隔动态读取，随配置热重载生效）
     let cleanup = lb::spawn_sticky_cleanup(state.clone());
+    let probe = probe::spawn_probe_task(state.clone());
     let addr = format!("{host}:{port}");
     let listener = TcpListener::bind(&addr).await?;
     info!("proxy listening on http://{addr}");
     let app = api::router(state);
     let result = axum::serve(listener, app).await;
-    // 服务退出时终止清理任务，避免同一进程内重启服务后残留多个任务
+    // 服务退出时终止后台任务，避免同一进程内重启服务后残留多个任务
     cleanup.abort();
+    probe.abort();
     result?;
     Ok(())
 }
@@ -69,8 +73,9 @@ pub async fn serve_cancellable(
         let cfg = state.config.read();
         (cfg.server.host.clone(), cfg.server.port)
     };
-    // 启动 sticky 会话清理后台任务（TTL 每轮从配置动态读取）
+    // 启动 sticky 会话清理与熔断探活后台任务（TTL / 探活间隔每轮从配置动态读取）
     let cleanup = lb::spawn_sticky_cleanup(state.clone());
+    let probe = probe::spawn_probe_task(state.clone());
 
     let addr = format!("{host}:{port}");
     let listener = TcpListener::bind(&addr).await?;
@@ -90,8 +95,9 @@ pub async fn serve_cancellable(
         if let Err(e) = server.await {
             error!("proxy server error: {e}");
         }
-        // 服务退出后终止清理任务，避免反复重启导致清理任务累积
+        // 服务退出后终止后台任务，避免反复重启导致任务累积
         cleanup.abort();
+        probe.abort();
     });
 
     Ok(RunningServer {
@@ -217,7 +223,8 @@ impl ServerSupervisor {
         state: Arc<AppState>,
         new_addr: String,
     ) -> Result<bool, String> {
-        if self.current_addr().await.as_deref() == Some(new_addr.as_str()) && self.is_running().await
+        if self.current_addr().await.as_deref() == Some(new_addr.as_str())
+            && self.is_running().await
         {
             return Ok(false);
         }
@@ -239,5 +246,8 @@ pub async fn apply_server_config(state: &Arc<AppState>) -> Result<bool, String> 
         let cfg = state.config.read();
         format!("{}:{}", cfg.server.host, cfg.server.port)
     };
-    state.server.restart_if_addr_changed(state.clone(), addr).await
+    state
+        .server
+        .restart_if_addr_changed(state.clone(), addr)
+        .await
 }

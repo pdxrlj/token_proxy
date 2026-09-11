@@ -29,15 +29,19 @@ export interface UserConfig {
 export interface CircuitBreakerConfig {
   enabled: boolean;
   failure_threshold: number;
-  cooldown_secs: number;
+  /** 熔断持续时间（秒）；旧字段 cooldown_secs 通过 serde alias 兼容读入 */
+  open_duration_secs: number;
+  /** 主动探活任务的轮询间隔（秒） */
+  probe_interval_secs: number;
+  /** 半开状态恢复（转 Closed）所需的连续成功次数 */
+  recovery_success_threshold: number;
+  /** Panic 试探窗口（秒）：全部候选熔断时按此窗口限速放行试探请求 */
+  panic_probe_window_secs: number;
 }
 
 export interface RetryConfig {
   max_retries: number;
-  base_delay_ms: number;
-  max_delay_ms: number;
   retry_statuses: number[];
-  retry_on_network_error: boolean;
   circuit_breaker: CircuitBreakerConfig;
 }
 
@@ -216,6 +220,8 @@ export type BreakerStateName = "closed" | "open" | "half_open";
 export interface BreakerStatus {
   state: BreakerStateName;
   consecutive_failures: number;
+  /** 熔断冷却剩余秒数（仅 open 状态有值，其余为 null） */
+  cooldown_remaining_secs?: number | null;
 }
 
 export type BreakerMap = Record<string, BreakerStatus>;
@@ -229,14 +235,14 @@ export const DEFAULT_CONFIG: AppConfig = {
   },
   retry: {
     max_retries: 3,
-    base_delay_ms: 500,
-    max_delay_ms: 8000,
     retry_statuses: [408, 429, 500, 502, 503, 529],
-    retry_on_network_error: true,
     circuit_breaker: {
       enabled: true,
       failure_threshold: 5,
-      cooldown_secs: 30,
+      open_duration_secs: 3600,
+      probe_interval_secs: 30,
+      recovery_success_threshold: 2,
+      panic_probe_window_secs: 60,
     },
   },
   providers: [],

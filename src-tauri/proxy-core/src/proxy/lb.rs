@@ -4,11 +4,21 @@
 //! 始终路由到同一上游，避免上下文丢失或缓存失效。
 //!
 //! # 模块结构
-//! - [`select`]         — 主入口：粘性优先 → 策略选择 → 记录粘性
-//! - 策略函数           — `round_robin` / `random_index` / `weighted_random` / `fastest_response` / `least_connections`
+//! - [`select`]         — 主入口：粘性优先（含熔断校验）→ 策略选择（eligible 子集）→ 记录粘性
+//! - 策略函数           — `smooth_weighted_round_robin`（SWRR，RoundRobin/Weighted 共用）
+//!                       / `random_index` / `fastest_response` / `least_connections`
+//! - 慢启动             — 熔断恢复后有效权重从 10% 线性爬升到 100%（Nginx `slow_start` 语义）
 //! - 会话 Key 提取      — [`extract_session_key`] 从请求中提取会话标识
 //! - 运行时统计辅助     — `inc_in_flight` / `dec_in_flight` / `record_latency`
-//! - 后台清理           — [`spawn_sticky_cleanup`] 定时回收过期粘性条目
+//! - 后台清理           — [`spawn_sticky_cleanup`] 定时回收过期粘性与失效 SWRR 条目
+//!
+//! # 均衡算法选型（参考成熟方案）
+//! - **SWRR**（Smooth Weighted Round Robin，Nginx 同款）：替换朴素计数器取模轮询
+//!   与加权随机——分配序列均匀无突发、权重感知、候选集热变化时自然过渡
+//! - **慢启动**（Nginx `slow_start`）：熔断恢复的渠道权重逐步爬升，避免刚恢复
+//!   就被全量流量冲垮（与熔断器半开恢复阈值形成双层平滑）
+//! - `FastestResponse`（EWMA 乐观基线）与 `LeastConnections`（在途计数）天然具备
+//!   恢复特性，不需要额外慢启动处理
 
 use crate::proxy::config::{Candidate, LoadBalanceConfig, SessionKeySource};
 use crate::proxy::state::{AppState, StickyEntry};
@@ -30,7 +40,9 @@ pub fn route_key(model: &str, provider_id: &str, upstream_model: &str) -> String
 }
 
 /// 从候选路由中提取 `route_key`（upstream_model 为空时取空串）。
-fn route_key_for_candidate(model: &str, candidate: &Candidate<'_>) -> String {
+///
+/// 供模块内策略函数与 api.rs 的 eligible 过滤共用。
+pub fn route_key_for_candidate(model: &str, candidate: &Candidate<'_>) -> String {
     let upstream_model = candidate
         .route
         .map(|r| r.upstream_model.as_str())
@@ -40,21 +52,26 @@ fn route_key_for_candidate(model: &str, candidate: &Candidate<'_>) -> String {
 
 // ─────────────────────────── 主选择入口 ───────────────────────────
 
-/// 从候选列表中选择一个索引。
+/// 从候选列表中选择一个索引（索引相对传入的完整候选列表）。
 ///
 /// # 选择顺序
-/// 1. **粘性优先**：若启用 sticky 且有 session_key，先查粘性映射命中
-/// 2. **策略选择**：未命中则按 `lb_cfg.strategy` 选择
-/// 3. **记录粘性**：选中后若有 session_key 则写入粘性映射
+/// 1. **粘性优先**：若启用 sticky 且有 session_key，先查粘性映射命中；
+///    命中但目标已熔断（不在 eligible 子集内）时视为未命中，走策略重选
+/// 2. **策略选择**：在 `eligible` 子集上按 `lb_cfg.strategy` 选择
+/// 3. **记录粘性**：选中后若有 session_key 则写入粘性映射（记录完整列表索引）
+///
+/// # 参数
+/// - `eligible`：可参与选择的候选索引（熔断过滤后的子集）；`None` 表示不过滤
 ///
 /// # 返回
-/// `Some(index)` 表示选中候选在列表中的索引；`None` 表示候选列表为空。
+/// `Some(index)` 表示选中候选在完整列表中的索引；`None` 表示候选列表为空。
 pub fn select(
     state: &AppState,
     candidates: &[Candidate<'_>],
     model: &str,
     session_key: Option<&str>,
     lb_cfg: &LoadBalanceConfig,
+    eligible: Option<&[usize]>,
 ) -> Option<usize> {
     if candidates.is_empty() {
         return None;
@@ -64,28 +81,43 @@ pub fn select(
         return Some(0);
     }
 
-    // 1. 粘性优先
+    // 参与选择的候选池（熔断过滤后的 eligible 子集）
+    let pool: Vec<usize> = match eligible {
+        Some(e) => e.to_vec(),
+        None => (0..candidates.len()).collect(),
+    };
+    if pool.is_empty() {
+        return None;
+    }
+    if pool.len() == 1 {
+        return Some(pool[0]);
+    }
+
+    // 1. 粘性优先（命中且目标可参与选择时直接复用）
     if lb_cfg.sticky.enabled {
         if let Some(key) = session_key {
             if let Some(idx) = lookup_sticky(state, key, candidates, lb_cfg, model) {
-                return Some(idx);
+                if pool.contains(&idx) {
+                    return Some(idx);
+                }
+                // 粘性目标已熔断：视为未命中，走策略重选
             }
         }
     }
 
-    // 2. 按策略选择
-    let idx = select_by_strategy(state, candidates, model, lb_cfg.strategy);
+    // 2. 在 eligible 子集上按策略选择
+    let subset: Vec<Candidate<'_>> = pool.iter().map(|&i| candidates[i]).collect();
+    let pos = select_by_strategy(state, &subset, model, lb_cfg.strategy)?;
+    let orig = pool[pos];
 
-    // 3. 记录粘性
+    // 3. 记录粘性（记录完整列表索引，下次校验 route_key 用）
     if lb_cfg.sticky.enabled {
         if let Some(key) = session_key {
-            if let Some(i) = idx {
-                record_sticky(state, key, i, &candidates[i], model);
-            }
+            record_sticky(state, key, orig, &candidates[orig], model);
         }
     }
 
-    idx
+    Some(orig)
 }
 
 // ─────────────────────────── 粘性会话 ───────────────────────────
@@ -116,8 +148,7 @@ fn lookup_sticky(
                 Verdict::Stale
             } else {
                 // 校验路由标识未变（配置调整或请求模型不同都会导致索引指向错误路线）
-                let expected =
-                    route_key_for_candidate(model, &candidates[entry.candidate_index]);
+                let expected = route_key_for_candidate(model, &candidates[entry.candidate_index]);
                 if entry.route_key != expected {
                     Verdict::Stale
                 } else {
@@ -174,9 +205,15 @@ fn select_by_strategy(
     strategy: crate::proxy::config::LbStrategy,
 ) -> Option<usize> {
     match strategy {
-        crate::proxy::config::LbStrategy::RoundRobin => round_robin(state, model, candidates.len()),
+        // 轮询 → SWRR（所有候选等权）：平滑轮询，分配序列无突发
+        crate::proxy::config::LbStrategy::RoundRobin => {
+            smooth_weighted_round_robin(state, candidates, model, false)
+        }
+        // 加权随机 → SWRR（route.weight）：平滑加权轮询，比例精确无方差
+        crate::proxy::config::LbStrategy::Weighted => {
+            smooth_weighted_round_robin(state, candidates, model, true)
+        }
         crate::proxy::config::LbStrategy::Random => random_index(candidates.len()),
-        crate::proxy::config::LbStrategy::Weighted => weighted_random(candidates),
         crate::proxy::config::LbStrategy::FastestResponse => {
             fastest_response(state, candidates, model)
         }
@@ -186,21 +223,98 @@ fn select_by_strategy(
     }
 }
 
-/// 轮询：用原子计数器取模，保证均匀分配。
+// ─────────────────────────── SWRR 平滑加权轮询 ───────────────────────────
+
+/// 慢启动时长（秒）：熔断恢复后有效权重从 10% 线性爬升到 100% 的时间窗口。
 ///
-/// 计数器 key 包含候选数（`{model}#{len}`）：配置热重载导致候选数变化时
-/// 自动切换到新序列，避免模数突变造成的分配错乱。
-fn round_robin(state: &AppState, model: &str, len: usize) -> Option<usize> {
-    if len == 0 {
+/// 内部固定参数（Nginx `slow_start` 同款语义），不对外暴露配置。
+pub const SLOW_START_SECS: u64 = 120;
+/// 慢启动起始比例（百分比）：恢复瞬间只放 10% 流量
+const SLOW_START_MIN_PCT: u64 = 10;
+/// 权重放大系数：×10 后做整数运算，让 weight=1 的候选在慢启动期
+/// 也能表达 10%~90% 的中间权重（否则 1×10% 向下取整恒为 0）
+const WEIGHT_SCALE: i64 = 10;
+
+/// SWRR 平滑加权轮询（Nginx 算法）。
+///
+/// 每轮：`cw[i] += w_eff[i]`；取 `cw` 最大者（并列取靠前者）；`cw[winner] -= Σw_eff`。
+/// - 分配序列均匀无突发：权重 5:1:1 → 每 7 次恰好 5:1:1
+/// - 候选集变化时自然过渡：cw 残留值有界，热重载后不会错乱
+/// - `w_eff` 叠加慢启动：熔断恢复（`recovered_at` 有值）后权重从 10% 爬升到 100%
+///
+/// `use_route_weights=false` 时所有候选视为等权（RoundRobin 语义）。
+fn smooth_weighted_round_robin(
+    state: &AppState,
+    candidates: &[Candidate<'_>],
+    model: &str,
+    use_route_weights: bool,
+) -> Option<usize> {
+    if candidates.is_empty() {
         return None;
     }
-    let key = format!("{model}#{len}");
-    let counter = state
-        .lb_counters
-        .entry(key)
-        .or_insert_with(|| std::sync::atomic::AtomicU64::new(0));
-    let val = counter.fetch_add(1, Ordering::Relaxed);
-    Some((val as usize) % len)
+
+    // 有效权重 = 基础权重 × 慢启动因子（放大 10 倍做整数运算）
+    let weights: Vec<i64> = candidates
+        .iter()
+        .map(|c| {
+            let base: i64 = if use_route_weights {
+                c.route.map(|r| r.weight).unwrap_or(1).max(1) as i64
+            } else {
+                1
+            };
+            effective_weight(state, model, c, base)
+        })
+        .collect();
+    let total: i64 = weights.iter().sum();
+    if total <= 0 {
+        return random_index(candidates.len());
+    }
+
+    // cw[i] += w[i]
+    let mut currents: Vec<i64> = Vec::with_capacity(candidates.len());
+    for (i, c) in candidates.iter().enumerate() {
+        let key = route_key_for_candidate(model, c);
+        let cell = state
+            .swrr_weights
+            .entry(key)
+            .or_insert_with(|| std::sync::atomic::AtomicI64::new(0));
+        currents.push(cell.fetch_add(weights[i], Ordering::Relaxed) + weights[i]);
+    }
+
+    // 取最大者（并列取靠前者，保证确定性）
+    let mut winner = 0;
+    for i in 1..currents.len() {
+        if currents[i] > currents[winner] {
+            winner = i;
+        }
+    }
+
+    // cw[winner] -= total
+    let winner_key = route_key_for_candidate(model, &candidates[winner]);
+    if let Some(cell) = state.swrr_weights.get(&winner_key) {
+        cell.fetch_sub(total, Ordering::Relaxed);
+    }
+
+    Some(winner)
+}
+
+/// 候选有效权重：基础权重 × 慢启动因子。
+///
+/// - 熔断器无恢复记录（未熔断 / 手动 reset）→ 全量权重
+/// - 恢复后 `t` 秒内 → `pct = 10 + 90×t/120` 线性爬升，封顶 100%
+fn effective_weight(state: &AppState, model: &str, c: &Candidate<'_>, base: i64) -> i64 {
+    let key = route_key_for_candidate(model, c);
+    let recovered = state.breakers.get(&key).and_then(|b| b.recovered_at());
+    match recovered {
+        None => base * WEIGHT_SCALE,
+        Some(at) => {
+            let t = at.elapsed().as_secs();
+            let pct =
+                (SLOW_START_MIN_PCT + (100 - SLOW_START_MIN_PCT) * t / SLOW_START_SECS).min(100);
+            // base×10×pct/100：weight=1 起步即 1（满权 10 的 10%）
+            base * WEIGHT_SCALE * (pct as i64) / 100
+        }
+    }
 }
 
 /// 均匀随机。
@@ -209,32 +323,6 @@ fn random_index(len: usize) -> Option<usize> {
         return None;
     }
     Some(rand::thread_rng().gen_range(0..len))
-}
-
-/// 加权随机：按 `route.weight` 比例分配概率。
-///
-/// 权重用 `u64` 累加，避免大权重下 `u32` 溢出。
-fn weighted_random(candidates: &[Candidate<'_>]) -> Option<usize> {
-    if candidates.is_empty() {
-        return None;
-    }
-    let weights: Vec<u64> = candidates
-        .iter()
-        .map(|c| c.route.map(|r| r.weight as u64).unwrap_or(1))
-        .collect();
-    let total: u64 = weights.iter().sum();
-    if total == 0 {
-        return random_index(candidates.len());
-    }
-    let r = rand::thread_rng().gen_range(0..total);
-    let mut acc = 0u64;
-    for (i, &w) in weights.iter().enumerate() {
-        acc += w;
-        if r < acc {
-            return Some(i);
-        }
-    }
-    Some(candidates.len() - 1)
 }
 
 /// 按响应速度选择：EWMA 延迟最低的优先。
@@ -398,6 +486,14 @@ impl InFlightGuard {
         }
     }
 
+    /// 本 guard 对应的 route_key（`model|provider_id|upstream_model`）。
+    ///
+    /// 流式请求转发时用它回查熔断器（断流记失败），与 route_and_call
+    /// 的 key 完全一致，避免按 log 字段重新拼接产生偏差。
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
     /// 立即归还计数（之后析构不再重复归还）。
     pub fn release(mut self) {
         if let Some(state) = self.state.take() {
@@ -437,36 +533,57 @@ pub fn record_latency(state: &AppState, key: &str, latency_ms: u64) {
 
 // ─────────────────────────── 后台清理 ───────────────────────────
 
-/// 启动后台定时任务，每 60 秒清理过期的 sticky 会话条目。
+/// 启动后台定时任务，每 60 秒清理过期的 sticky 会话条目与失效的 SWRR 条目。
 ///
-/// TTL 每轮从当前配置动态读取（而非启动时固化），使 GUI 修改粘性 TTL 后
-/// 无需重启即可生效。返回的 `JoinHandle` 由调用方在服务关闭时 `abort()`。
-pub fn spawn_sticky_cleanup(
-    state: std::sync::Arc<AppState>,
-) -> tokio::task::JoinHandle<()> {
+/// TTL 与有效 route_key 集合每轮从当前配置动态读取（而非启动时固化），
+/// 使 GUI 修改配置后无需重启即可生效。返回的 `JoinHandle` 由调用方在服务关闭时 `abort()`。
+pub fn spawn_sticky_cleanup(state: std::sync::Arc<AppState>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
         loop {
             interval.tick().await;
-            // 动态读取当前 TTL，配置热重载后立即生效
-            let ttl_secs = state.config.read().load_balance.sticky.ttl_secs;
+            // 动态读取当前 TTL 与有效 route_key 集合，配置热重载后立即生效
+            let (ttl_secs, valid_keys) = {
+                let cfg = state.config.read();
+                (cfg.load_balance.sticky.ttl_secs, valid_route_keys(&cfg))
+            };
             let now = Instant::now();
             state
                 .sticky_sessions
                 .retain(|_, entry| now.duration_since(entry.created_at).as_secs() < ttl_secs);
 
-            // 顺带回收长期未使用的轮询计数器条目，避免 lb_counters 无界增长。
-            // 这里采用"分代清理"的简单策略：条目数超过阈值时整体重建，
-            // 因为 AtomicU64 不携带使用时间信息，无法逐条判断空闲时长。
-            if state.lb_counters.len() > LB_COUNTER_MAX {
-                state.lb_counters.clear();
+            // 回收失效的 SWRR 条目：route_key 不在当前配置中的直接删除
+            // （渠道/路由被删后残留的 current_weight 无意义）；
+            // 容量上限保护：极端情况下（如配置解析无法覆盖的组合键）整体清空重建。
+            state.swrr_weights.retain(|k, _| valid_keys.contains(k));
+            if state.swrr_weights.len() > SWRR_MAP_MAX {
+                state.swrr_weights.clear();
             }
         }
     })
 }
 
-/// `lb_counters` 条目数上限；超过后整体清空重建，防止无界增长。
-const LB_COUNTER_MAX: usize = 1024;
+/// 当前配置可能产生的全部 route_key 集合（SWRR 条目有效性判定用）。
+///
+/// 与 [`resolve_candidates`](crate::proxy::config::AppConfig::resolve_candidates)
+/// 的解析规则保持一致：
+/// - 显式路由：`model | provider_id | upstream_model`
+/// - 隐式候选：provider.models 中的模型 → `model | provider_id | ""`
+fn valid_route_keys(cfg: &crate::proxy::config::AppConfig) -> std::collections::HashSet<String> {
+    let mut keys = std::collections::HashSet::new();
+    for r in &cfg.routes {
+        keys.insert(route_key(&r.model, &r.provider, &r.upstream_model));
+    }
+    for p in &cfg.providers {
+        for m in &p.models {
+            keys.insert(route_key(m, &p.id, ""));
+        }
+    }
+    keys
+}
+
+/// `swrr_weights` 条目数上限；超过后整体清空重建，防止无界增长。
+const SWRR_MAP_MAX: usize = 4096;
 
 // ─────────────────────────── 单元测试 ───────────────────────────
 
@@ -516,10 +633,10 @@ mod tests {
             },
         };
 
-        let i1 = select(&state, &candidates, "m", None, &lb).unwrap();
-        let i2 = select(&state, &candidates, "m", None, &lb).unwrap();
-        let i3 = select(&state, &candidates, "m", None, &lb).unwrap();
-        // 轮询应该循环
+        let i1 = select(&state, &candidates, "m", None, &lb, None).unwrap();
+        let i2 = select(&state, &candidates, "m", None, &lb, None).unwrap();
+        let i3 = select(&state, &candidates, "m", None, &lb, None).unwrap();
+        // SWRR 平滑轮询应该循环
         assert_ne!(i1, i2);
         assert_eq!(i1, i3);
     }
@@ -553,13 +670,13 @@ mod tests {
         };
 
         // 第一次选择（无 sticky 记录）→ 记录 sticky
-        let i1 = select(&state, &candidates, "m", Some("sess-1"), &lb).unwrap();
+        let i1 = select(&state, &candidates, "m", Some("sess-1"), &lb, None).unwrap();
         // 第二次选择（有 sticky 记录）→ 应命中同一索引
-        let i2 = select(&state, &candidates, "m", Some("sess-1"), &lb).unwrap();
+        let i2 = select(&state, &candidates, "m", Some("sess-1"), &lb, None).unwrap();
         assert_eq!(i1, i2, "sticky session should hit same upstream");
 
         // 不同会话 key 可能选到不同上游
-        let _i3 = select(&state, &candidates, "m", Some("sess-2"), &lb);
+        let _i3 = select(&state, &candidates, "m", Some("sess-2"), &lb, None);
     }
 
     #[test]
@@ -593,7 +710,7 @@ mod tests {
             },
         };
 
-        let idx = select(&state, &candidates, "m", None, &lb).unwrap();
+        let idx = select(&state, &candidates, "m", None, &lb, None).unwrap();
         assert_eq!(candidates[idx].provider.id, "fast");
     }
 
@@ -629,7 +746,7 @@ mod tests {
             },
         };
 
-        let idx = select(&state, &candidates, "m", None, &lb).unwrap();
+        let idx = select(&state, &candidates, "m", None, &lb, None).unwrap();
         assert_eq!(
             candidates[idx].provider.id, "unknown",
             "无样本的候选应获得冷启动机会，而非被 u64::MAX 永久饿死"
@@ -637,7 +754,7 @@ mod tests {
 
         // 冷启动后（"unknown" 产生样本且更慢），流量应回到真正更快的候选
         record_latency(&state, &route_key("m", "unknown", ""), 800);
-        let idx2 = select(&state, &candidates, "m", None, &lb).unwrap();
+        let idx2 = select(&state, &candidates, "m", None, &lb, None).unwrap();
         assert_eq!(
             candidates[idx2].provider.id, "known",
             "产生样本后应恢复按实际延迟选择"
@@ -645,8 +762,8 @@ mod tests {
     }
 
     #[test]
-    fn weighted_random_respects_weights() {
-        // 权重 9:1 时，采样分布应显著偏向高权重候选
+    fn swrr_weighted_distribution_exact() {
+        // 权重 9:1 → SWRR 每 10 次恰好 9:1（比例精确，无随机方差）
         let mut cfg = AppConfig::default();
         cfg.providers = vec![
             ProviderConfig {
@@ -686,19 +803,210 @@ mod tests {
         };
 
         let mut heavy = 0;
-        let n = 4000;
-        for _ in 0..n {
-            let idx = select(&state, &candidates, "m", None, &lb).unwrap();
+        for _ in 0..10 {
+            let idx = select(&state, &candidates, "m", None, &lb, None).unwrap();
             if candidates[idx].provider.id == "heavy" {
                 heavy += 1;
             }
         }
-        // 期望约 90%，允许 ±5% 误差
-        let ratio = heavy as f64 / n as f64;
+        assert_eq!(heavy, 9, "SWRR 权重 9:1 应在 10 次内恰好分配 9:1");
+    }
+
+    #[test]
+    fn swrr_sequence_matches_weights() {
+        // 权重 5:1:1 → SWRR 每 7 次恰好 5:1:1，且分布无连续突发
+        let mut cfg = AppConfig::default();
+        cfg.providers = vec![
+            ProviderConfig {
+                id: "heavy".into(),
+                ..ProviderConfig::demo()
+            },
+            ProviderConfig {
+                id: "l1".into(),
+                ..ProviderConfig::demo()
+            },
+            ProviderConfig {
+                id: "l2".into(),
+                ..ProviderConfig::demo()
+            },
+        ];
+        cfg.routes = vec![
+            crate::proxy::config::RouteConfig {
+                model: "m".into(),
+                provider: "heavy".into(),
+                weight: 5,
+                ..Default::default()
+            },
+            crate::proxy::config::RouteConfig {
+                model: "m".into(),
+                provider: "l1".into(),
+                weight: 1,
+                ..Default::default()
+            },
+            crate::proxy::config::RouteConfig {
+                model: "m".into(),
+                provider: "l2".into(),
+                weight: 1,
+                ..Default::default()
+            },
+        ];
+        let state = make_state();
+        let candidates = make_candidates(&cfg, "m");
+        assert_eq!(candidates.len(), 3);
+
+        let lb = LoadBalanceConfig {
+            enabled: true,
+            strategy: LbStrategy::Weighted,
+            sticky: StickyConfig {
+                enabled: false,
+                ..Default::default()
+            },
+        };
+
+        let mut counts = std::collections::BTreeMap::new();
+        for _ in 0..7 {
+            let idx = select(&state, &candidates, "m", None, &lb, None).unwrap();
+            *counts
+                .entry(candidates[idx].provider.id.clone())
+                .or_insert(0) += 1;
+        }
+        assert_eq!(counts.get("heavy"), Some(&5));
+        assert_eq!(counts.get("l1"), Some(&1));
+        assert_eq!(counts.get("l2"), Some(&1));
+    }
+
+    #[test]
+    fn slow_start_ramps_recovered_candidate() {
+        // A 刚从熔断恢复（recovered_at=now，慢启动 10%），B 全量：
+        // 等权下 A 的有效权重 = 满权的 1/10 → 11 次选择中 A 恰好 1 次
+        let mut cfg = AppConfig::default();
+        cfg.providers = vec![
+            ProviderConfig {
+                id: "a".into(),
+                models: vec!["m".into()],
+                ..ProviderConfig::demo()
+            },
+            ProviderConfig {
+                id: "b".into(),
+                models: vec!["m".into()],
+                ..ProviderConfig::demo()
+            },
+        ];
+        let state = make_state();
+        let candidates = make_candidates(&cfg, "m");
+
+        // 构造 A 的"刚恢复"熔断器：跳闸 → 到期(open_duration=0) → 半开 → 成功关闭
+        let breaker = std::sync::Arc::new(crate::proxy::circuit::CircuitBreaker::new());
+        let zero = crate::proxy::config::CircuitBreakerConfig {
+            open_duration_secs: 0,
+            recovery_success_threshold: 1,
+            ..Default::default()
+        };
+        breaker.trip_now();
         assert!(
-            (0.85..=0.95).contains(&ratio),
-            "weighted distribution off: got {ratio:.3}, expected ~0.90"
+            breaker.before_request(&zero).is_ok(),
+            "open_duration=0 → 立即到期转半开"
         );
+        breaker.on_success(&zero);
+        assert_eq!(
+            breaker.status().state,
+            crate::proxy::circuit::BreakerState::Closed
+        );
+        assert!(breaker.recovered_at().is_some(), "关闭时应记录恢复时刻");
+        state.breakers.insert(route_key("m", "a", ""), breaker);
+
+        let lb = LoadBalanceConfig {
+            enabled: true,
+            strategy: LbStrategy::RoundRobin,
+            sticky: StickyConfig {
+                enabled: false,
+                ..Default::default()
+            },
+        };
+
+        let mut a_count = 0;
+        for _ in 0..11 {
+            let idx = select(&state, &candidates, "m", None, &lb, None).unwrap();
+            if candidates[idx].provider.id == "a" {
+                a_count += 1;
+            }
+        }
+        assert_eq!(a_count, 1, "慢启动期 A 只应拿到约 10% 流量（11 次中 1 次）");
+    }
+
+    #[test]
+    fn select_restricted_to_eligible() {
+        // 候选 [a, b, c]，b 已熔断（eligible=[0,2]）→ 选择永远不落到 b
+        let mut cfg = AppConfig::default();
+        cfg.providers = vec![
+            ProviderConfig {
+                id: "a".into(),
+                models: vec!["m".into()],
+                ..ProviderConfig::demo()
+            },
+            ProviderConfig {
+                id: "b".into(),
+                models: vec!["m".into()],
+                ..ProviderConfig::demo()
+            },
+            ProviderConfig {
+                id: "c".into(),
+                models: vec!["m".into()],
+                ..ProviderConfig::demo()
+            },
+        ];
+        let state = make_state();
+        let candidates = make_candidates(&cfg, "m");
+        assert_eq!(candidates.len(), 3);
+
+        // b 的熔断器：跳闸后未到期（默认 3600s）→ 不在 eligible 内
+        let breaker = std::sync::Arc::new(crate::proxy::circuit::CircuitBreaker::new());
+        breaker.trip_now();
+        state.breakers.insert(route_key("m", "b", ""), breaker);
+
+        let lb = LoadBalanceConfig {
+            enabled: true,
+            strategy: LbStrategy::RoundRobin,
+            sticky: StickyConfig {
+                enabled: false,
+                ..Default::default()
+            },
+        };
+
+        let eligible = [0usize, 2];
+        for _ in 0..20 {
+            let idx = select(&state, &candidates, "m", None, &lb, Some(&eligible)).unwrap();
+            assert_ne!(candidates[idx].provider.id, "b", "熔断候选不应被选中");
+        }
+
+        // 粘性指向已熔断的 b：命中但不在 eligible 内 → 视为未命中重选
+        let sticky_lb = LoadBalanceConfig {
+            enabled: true,
+            strategy: LbStrategy::RoundRobin,
+            sticky: StickyConfig {
+                enabled: true,
+                session_key_source: SessionKeySource::Header("x-session-id".into()),
+                ttl_secs: 1800,
+            },
+        };
+        state.sticky_sessions.insert(
+            "sess-b".into(),
+            crate::proxy::state::StickyEntry {
+                candidate_index: 1,
+                route_key: route_key("m", "b", ""),
+                created_at: Instant::now(),
+            },
+        );
+        let idx = select(
+            &state,
+            &candidates,
+            "m",
+            Some("sess-b"),
+            &sticky_lb,
+            Some(&eligible),
+        )
+        .unwrap();
+        assert_ne!(candidates[idx].provider.id, "b", "粘性目标已熔断应重选");
     }
 
     #[test]
@@ -757,14 +1065,17 @@ mod tests {
             },
         };
 
-        let idx = select(&state, &candidates, "m", Some("sess-x"), &lb).unwrap();
+        let idx = select(&state, &candidates, "m", Some("sess-x"), &lb, None).unwrap();
         // route_key 不匹配 → 粘性失效 → 重新选择并覆盖记录
         let entry = state.sticky_sessions.get("sess-x").unwrap();
         assert_eq!(
             entry.candidate_index, idx,
             "stale sticky entry should be re-selected and overwritten"
         );
-        assert_eq!(entry.route_key, route_key_for_candidate("m", &candidates[idx]));
+        assert_eq!(
+            entry.route_key,
+            route_key_for_candidate("m", &candidates[idx])
+        );
     }
 
     #[test]

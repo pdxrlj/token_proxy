@@ -149,8 +149,8 @@ pub fn forward_raw(resp: reqwest::Response) -> Body {
 
 /// SSE 流式转发：逐行解析并转发，统计 usage，断流时发 error 事件
 ///
-/// `provider_id` 用于在上游流中断时向对应熔断器记一次失败，
-/// 使持续断流的上游也能被熔断/故障切换机制隔离。
+/// `route_key`（`model|provider_id|upstream_model`）用于在上游流中断时
+/// 向对应熔断器记一次失败，使持续断流的上游也能被熔断/故障切换机制隔离。
 pub fn forward_sse(
     state: Arc<AppState>,
     provider_name: String,
@@ -163,7 +163,7 @@ pub fn forward_sse(
     log_upstream_model: Option<String>,
     log_provider: Option<String>,
     _log_tokens_in: Option<u64>,
-    provider_id: Option<String>,
+    route_key: Option<String>,
     // 在途计数 guard：随流转移进来，在流结束时归还。
     // 为 `None` 时表示调用方未启用在途计数（如兜底透传路径）。
     inflight: Option<crate::proxy::lb::InFlightGuard>,
@@ -238,10 +238,13 @@ pub fn forward_sse(
                 }
                 Some(Err(e)) => {
                     warn!(provider = %provider_name, model = %model, error = %e, "upstream stream interrupted");
-                    // 断流计入熔断失败：持续断流的上游同样应被隔离
-                    if let Some(pid) = provider_id.as_deref() {
-                        if let Some(b) = state.breakers.get(pid) {
-                            b.on_failure();
+                    // 断流计入熔断失败：持续断流的上游同样应被隔离。
+                    // key 与 route_and_call 的 inflight_key 一致（由调用方从
+                    // InFlightGuard 透传），避免按 log 字段重新拼接产生偏差
+                    if let Some(rk) = route_key.as_deref() {
+                        if let Some(b) = state.breakers.get(rk) {
+                            let cb_cfg = state.config.read().retry.circuit_breaker.clone();
+                            b.on_failure(&cb_cfg);
                         }
                     }
                     let _ = tx

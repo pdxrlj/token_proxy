@@ -360,8 +360,12 @@ pub struct AppState {
     // ── 负载均衡运行时统计 ──
     /// 路由延迟统计：key = `{model}|{provider_id}|{upstream_model}`
     pub route_latency: DashMap<String, RouteLatencyStats>,
-    /// 轮询计数器：key = `{model}` → AtomicU64
-    pub lb_counters: DashMap<String, AtomicU64>,
+    /// SWRR 当前权重：key = `{model}|{provider_id}|{upstream_model}` → current_weight。
+    ///
+    /// 平滑加权轮询的运行状态（Nginx 算法）：每轮 `cw[i] += w[i]`，选出最大者后
+    /// `cw[winner] -= Σw`。相比朴素计数器取模，分配序列均匀无突发、权重感知、
+    /// 候选集变化时自然过渡。过期条目由 sticky 清理任务回收。
+    pub swrr_weights: DashMap<String, std::sync::atomic::AtomicI64>,
     /// 会话粘性映射：key = session_key → StickyEntry
     pub sticky_sessions: DashMap<String, StickyEntry>,
     /// 在途请求计数：key = `{model}|{provider_id}|{upstream_model}`
@@ -396,7 +400,7 @@ impl AppState {
             sink: Mutex::new(None),
             db: Mutex::new(None),
             route_latency: DashMap::new(),
-            lb_counters: DashMap::new(),
+            swrr_weights: DashMap::new(),
             sticky_sessions: DashMap::new(),
             in_flight: DashMap::new(),
             user_usage: DashMap::new(),

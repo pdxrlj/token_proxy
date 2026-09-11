@@ -201,15 +201,15 @@ impl Default for ServerConfig {
 // ─────────────────────────── 重试与熔断配置 ───────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RetryConfig {
+    /// 同渠道退避重试的最大次数（不含首次）；0 表示失败立即 failover
     pub max_retries: u32,
-    /// 指数退避基数（毫秒）
-    pub base_delay_ms: u64,
-    pub max_delay_ms: u64,
-    /// 可重试的 HTTP 状态码
+    /// 可重试的 HTTP 状态码（同渠道退避重试）。
+    ///
+    /// 注意：**503 不在此列**——503 由熔断器接管（单次立即跳闸 + 换渠道），
+    /// 无论本列表是否包含 503 都不影响该行为；列表只管其余状态码。
     pub retry_statuses: Vec<u16>,
-    /// 网络层错误（连接失败/超时/断流）也重试
-    pub retry_on_network_error: bool,
     pub circuit_breaker: CircuitBreakerConfig,
 }
 
@@ -217,10 +217,7 @@ impl Default for RetryConfig {
     fn default() -> Self {
         Self {
             max_retries: 3,
-            base_delay_ms: 500,
-            max_delay_ms: 8000,
-            retry_statuses: vec![408, 429, 500, 502, 503, 529],
-            retry_on_network_error: true,
+            retry_statuses: vec![408, 429, 500, 502, 529],
             circuit_breaker: CircuitBreakerConfig::default(),
         }
     }
@@ -228,17 +225,31 @@ impl Default for RetryConfig {
 
 /// 熔断器配置。
 ///
-/// 熔断器像一个电路保险丝：当某个上游连续失败达到 `failure_threshold` 次后，
-/// 自动“跳闸”进入 Open 状态，暂停对该上游的请求；经过 `cooldown_secs` 秒冷却后
-/// 进入 HalfOpen 半开状态，放行一个试探请求——成功则恢复正常（Closed），
-/// 失败则重新跳闸。这样可以快速隔离故障上游，避免持续向故障服务发送请求。
+/// 熔断器像一个电路保险丝：
+/// - 上游返回 **503** → **单次立即跳闸**（与 `retry_statuses` 无关，由熔断器接管）；
+/// - 其它错误连续失败达 `failure_threshold` 次 → 跳闸；
+/// - 跳闸后持续 `open_duration_secs`（默认 1 小时），期间新请求绕开该上游；
+/// - 期满后进入 HalfOpen 半开状态：主动探活任务与真实请求逐个试探，
+///   连续成功 `recovery_success_threshold` 次才完全恢复（Closed），并叠加慢启动；
+/// - 全部候选渠道均熔断时进入 Panic 模式：最早熔断的渠道按
+///   `panic_probe_window_secs` 窗口限速放行试探请求，避免把唯一渠道硬拒整个熔断时长。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CircuitBreakerConfig {
     pub enabled: bool,
-    /// 连续失败达到该次数后熔断（跳闸），暂停对该上游的请求
+    /// 非 503 错误的连续失败跳闸阈值
     pub failure_threshold: u32,
-    /// 熔断冷却时间（秒）；冷却后进入半开状态，放行一个试探请求
-    pub cooldown_secs: u64,
+    /// 熔断持续时间（秒），默认 3600（1 小时）。
+    ///
+    /// 旧配置字段名 `cooldown_secs` 通过 serde alias 无损读入。
+    #[serde(alias = "cooldown_secs")]
+    pub open_duration_secs: u64,
+    /// 主动探活任务的轮询间隔（秒）
+    pub probe_interval_secs: u64,
+    /// 半开状态恢复（转 Closed）所需的连续成功次数
+    pub recovery_success_threshold: u32,
+    /// Panic 试探窗口（秒）：同一熔断器在该窗口内最多放行 1 个 panic 请求
+    pub panic_probe_window_secs: u64,
 }
 
 impl Default for CircuitBreakerConfig {
@@ -246,7 +257,10 @@ impl Default for CircuitBreakerConfig {
         Self {
             enabled: true,
             failure_threshold: 5,
-            cooldown_secs: 30,
+            open_duration_secs: 3600,
+            probe_interval_secs: 30,
+            recovery_success_threshold: 2,
+            panic_probe_window_secs: 60,
         }
     }
 }
@@ -350,7 +364,9 @@ impl Default for RouteConfig {
 // ─────────────────────────── 候选路由解析 ───────────────────────────
 
 /// 一个候选路由（provider + 可选 route），用于负载均衡选择。
-#[derive(Debug, Clone)]
+///
+/// 全字段 Copy（两个引用 + 索引），便于在 eligible 子集上按值传递。
+#[derive(Debug, Clone, Copy)]
 pub struct Candidate<'a> {
     pub provider: &'a ProviderConfig,
     pub route: Option<&'a RouteConfig>,
@@ -547,14 +563,15 @@ mod tests {
     }
 
     #[test]
-    fn legacy_api_keys_field_still_loads() {
-        // 改名前导出的配置文件里字段叫 api_keys；改名后必须仍能读回，
-        // 否则老用户升级一次就会丢掉全部用户与配额设置。
+    fn legacy_config_still_loads() {
+        // 改名前导出的配置文件：字段叫 api_keys；retry 含已删除字段
+        // （base_delay_ms/max_delay_ms/retry_on_network_error）；熔断时长字段叫 cooldown_secs。
+        // 这些都必须仍能读回，否则老用户升级一次就会丢配置。
         let legacy = r#"{
             "server": { "host": "127.0.0.1", "port": 8787, "local_api_key": "" },
             "retry": {
                 "max_retries": 3, "base_delay_ms": 500, "max_delay_ms": 8000,
-                "retry_statuses": [429], "retry_on_network_error": true,
+                "retry_statuses": [429, 503], "retry_on_network_error": true,
                 "circuit_breaker": { "enabled": true, "failure_threshold": 5, "cooldown_secs": 30 }
             },
             "providers": [],
@@ -571,6 +588,14 @@ mod tests {
         assert_eq!(cfg.users.len(), 1, "旧字段 api_keys 应被读入 users");
         assert_eq!(cfg.users[0].id, "alice");
         assert_eq!(cfg.users[0].max_requests, Some(100));
+        // cooldown_secs 通过 alias 读入 open_duration_secs；用户旧值原样保留
+        assert_eq!(cfg.retry.circuit_breaker.open_duration_secs, 30);
+        // 新增字段缺失时取默认值
+        assert_eq!(cfg.retry.circuit_breaker.probe_interval_secs, 30);
+        assert_eq!(cfg.retry.circuit_breaker.recovery_success_threshold, 2);
+        assert_eq!(cfg.retry.circuit_breaker.panic_probe_window_secs, 60);
+        // 旧列表里的 503 无害保留（由熔断器接管，不参与同渠道重试判定）
+        assert!(cfg.retry.retry_statuses.contains(&503));
     }
 
     #[test]

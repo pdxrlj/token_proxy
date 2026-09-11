@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import type { AppData } from "../hooks/useAppData";
-import type { LbStrategy, SessionKeySource } from "../lib/types";
+import type { AppConfig, LbStrategy, SessionKeySource } from "../lib/types";
 import { api } from "../lib/tauri";
 import { Button, Field, Switch, useToast } from "../components/ui";
 import {
@@ -24,7 +24,7 @@ const PRESETS = {
 export function Settings({ data }: { data: AppData }) {
   const { config, status, save } = data;
   const toast = useToast();
-  const [draft, setDraft] = useState(() => JSON.parse(JSON.stringify(config)));
+  const [draft, setDraft] = useState(() => migrateCb(JSON.parse(JSON.stringify(config))));
   const [dirty, setDirty] = useState(false);
   const [importSummary, setImportSummary] = useState<string | null>(null);
   const [exportPath, setExportPath] = useState<string | null>(null);
@@ -217,38 +217,93 @@ export function Settings({ data }: { data: AppData }) {
               onChange={(v) => set({ retry: { ...draft.retry, circuit_breaker: { ...draft.retry.circuit_breaker, enabled: v } } })}
             />
           </div>
-          <p style={{ color: "var(--text-3)", fontSize: 12.5, marginBottom: 10 }}>
-            熔断器像一个自动开关：当某个上游连续请求失败达到指定次数后，自动“跳闸”暂停对该上游的请求，避免持续向故障服务发送请求；冷却时间过后自动放行一个试探请求，成功则恢复正常，失败则继续断开。
+          <p style={{ color: "var(--text-3)", fontSize: 12.5, marginBottom: 10, lineHeight: 1.6 }}>
+            上游返回 503 时立即跳闸熔断，暂停对该上游的请求；熔断时长到期后自动探活，
+            连续成功指定次数后完全恢复（含慢启动渐进放量）。全部候选渠道熔断时进入
+            Panic 模式，按窗口限速放行试探请求避免全部硬拒。
           </p>
           <div className="form-row">
-            <Field label="连续失败几次后熔断" help="比如填 5：上游连续失败 5 次后暂停请求。建议 3-20，过大会导致熔断器形同虚设">
+            <Field label="连续失败几次后熔断" help="非 503 错误的连续失败跳闸阈值，建议 3-20">
               <input
                 className="input mono"
                 type="number"
                 min={1}
-                max={50}
+                max={100}
                 value={draft.retry.circuit_breaker.failure_threshold}
                 onChange={(e) =>
                   set({
                     retry: {
                       ...draft.retry,
-                      circuit_breaker: { ...draft.retry.circuit_breaker, failure_threshold: Math.min(50, Math.max(1, Number(e.target.value) || 1)) },
+                      circuit_breaker: { ...draft.retry.circuit_breaker, failure_threshold: Math.min(100, Math.max(1, Number(e.target.value) || 1)) },
                     },
                   })
                 }
               />
             </Field>
-            <Field label="冷却时间（秒）">
+            <Field label="熔断时长（秒）" help="跳闸后持续断开的时间；默认 3600（1 小时）">
               <input
                 className="input mono"
                 type="number"
                 min={1}
-                value={draft.retry.circuit_breaker.cooldown_secs}
+                value={draft.retry.circuit_breaker.open_duration_secs}
                 onChange={(e) =>
                   set({
                     retry: {
                       ...draft.retry,
-                      circuit_breaker: { ...draft.retry.circuit_breaker, cooldown_secs: Number(e.target.value) || 1 },
+                      circuit_breaker: { ...draft.retry.circuit_breaker, open_duration_secs: Math.max(1, Number(e.target.value) || 3600) },
+                    },
+                  })
+                }
+              />
+            </Field>
+          </div>
+          <div className="form-row" style={{ marginTop: 10 }}>
+            <Field label="探活间隔（秒）" help="熔断到期后主动探活的轮询间隔，建议 10-60">
+              <input
+                className="input mono"
+                type="number"
+                min={1}
+                max={3600}
+                value={draft.retry.circuit_breaker.probe_interval_secs}
+                onChange={(e) =>
+                  set({
+                    retry: {
+                      ...draft.retry,
+                      circuit_breaker: { ...draft.retry.circuit_breaker, probe_interval_secs: Math.min(3600, Math.max(1, Number(e.target.value) || 30)) },
+                    },
+                  })
+                }
+              />
+            </Field>
+            <Field label="恢复成功阈值" help="半开状态需连续成功几次才完全恢复，建议 1-3">
+              <input
+                className="input mono"
+                type="number"
+                min={1}
+                max={10}
+                value={draft.retry.circuit_breaker.recovery_success_threshold}
+                onChange={(e) =>
+                  set({
+                    retry: {
+                      ...draft.retry,
+                      circuit_breaker: { ...draft.retry.circuit_breaker, recovery_success_threshold: Math.min(10, Math.max(1, Number(e.target.value) || 2)) },
+                    },
+                  })
+                }
+              />
+            </Field>
+            <Field label="Panic 窗口（秒）" help="全部候选熔断时，最早熔断者按此窗口限速放行试探">
+              <input
+                className="input mono"
+                type="number"
+                min={1}
+                max={3600}
+                value={draft.retry.circuit_breaker.panic_probe_window_secs}
+                onChange={(e) =>
+                  set({
+                    retry: {
+                      ...draft.retry,
+                      circuit_breaker: { ...draft.retry.circuit_breaker, panic_probe_window_secs: Math.min(3600, Math.max(1, Number(e.target.value) || 60)) },
                     },
                   })
                 }
@@ -276,49 +331,24 @@ export function Settings({ data }: { data: AppData }) {
             ))}
           </div>
         </div>
+        <p style={{ color: "var(--text-3)", fontSize: 12.5, marginBottom: 10, lineHeight: 1.6 }}>
+          同渠道失败后采用指数退避重试（退避基数为内部参数，自动管理）。
+          503 由熔断器接管，不参与同渠道重试。4xx 业务错误（400/401/403/404）永不重试。
+        </p>
         <div className="form-row">
-          <Field label="最大重试次数" help="建议 0-30，过大会导致单请求长时间阻塞">
+          <Field label="最大重试次数" help="同渠道退避重试的最大次数（不含首次），建议 0-10">
             <input
               className="input mono"
               type="number"
               min={0}
-              max={30}
+              max={10}
               value={draft.retry.max_retries}
-              onChange={(e) => set({ retry: { ...draft.retry, max_retries: Math.min(30, Math.max(0, Number(e.target.value) || 0)) } })}
-            />
-          </Field>
-          <Field label="退避基数（毫秒）" help="指数退避：基数 × 2ⁿ + 抖动">
-            <input
-              className="input mono"
-              type="number"
-              min={50}
-              value={draft.retry.base_delay_ms}
-              onChange={(e) => set({ retry: { ...draft.retry, base_delay_ms: Number(e.target.value) || 500 } })}
-            />
-          </Field>
-          <Field label="最大退避（毫秒）">
-            <input
-              className="input mono"
-              type="number"
-              min={100}
-              value={draft.retry.max_delay_ms}
-              onChange={(e) => set({ retry: { ...draft.retry, max_delay_ms: Number(e.target.value) || 8000 } })}
+              onChange={(e) => set({ retry: { ...draft.retry, max_retries: Math.min(10, Math.max(0, Number(e.target.value) || 0)) } })}
             />
           </Field>
         </div>
-        <div style={{ height: 14 }} />
-        <div className="switch-row">
-          <div className="text">
-            <b>网络错误重试</b>
-            <span>连接失败、超时、断流等网络层错误也参与重试</span>
-          </div>
-          <Switch
-            checked={draft.retry.retry_on_network_error}
-            onChange={(v) => set({ retry: { ...draft.retry, retry_on_network_error: v } })}
-          />
-        </div>
-        <div style={{ height: 6 }} />
-        <Field label="可重试的状态码" help="点击切换；4xx 业务错误（400/401/403/404）永不重试">
+        <div style={{ height: 10 }} />
+        <Field label="可重试的状态码" help="点击切换；503 由熔断器独立处理，是否在此列表中不影响熔断行为">
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
             {DEFAULT_STATUSES.map((c) => (
               <button
@@ -354,9 +384,9 @@ export function Settings({ data }: { data: AppData }) {
               value={draft.load_balance?.strategy ?? "round_robin"}
               onChange={(e) => set({ load_balance: { ...draft.load_balance, strategy: e.target.value as LbStrategy } })}
             >
-              <option value="round_robin">轮询 (Round Robin)</option>
+              <option value="round_robin">平滑轮询 (SWRR)</option>
               <option value="fastest_response">最快响应 (Fastest Response)</option>
-              <option value="weighted">加权随机 (Weighted)</option>
+              <option value="weighted">平滑加权轮询 (SWRR Weighted)</option>
               <option value="random">随机 (Random)</option>
               <option value="least_connections">最少连接 (Least Connections)</option>
             </select>
@@ -537,4 +567,24 @@ function makeSessionKeySource(type: string, prev: SessionKeySource | undefined):
     case "first_user_message":
     default: return { type: "first_user_message" };
   }
+}
+
+/**
+ * 旧配置兼容：将 cooldown_secs → open_duration_secs，
+ * 补全新增的 circuit breaker 字段默认值。
+ */
+function migrateCb(cfg: AppConfig): AppConfig {
+  const cb = cfg.retry?.circuit_breaker;
+  if (!cb) return cfg;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const anyCb = cb as any;
+  if (anyCb.cooldown_secs != null && anyCb.open_duration_secs == null) {
+    anyCb.open_duration_secs = anyCb.cooldown_secs;
+    delete anyCb.cooldown_secs;
+  }
+  if (anyCb.open_duration_secs == null) anyCb.open_duration_secs = 3600;
+  if (anyCb.probe_interval_secs == null) anyCb.probe_interval_secs = 30;
+  if (anyCb.recovery_success_threshold == null) anyCb.recovery_success_threshold = 2;
+  if (anyCb.panic_probe_window_secs == null) anyCb.panic_probe_window_secs = 60;
+  return cfg;
 }

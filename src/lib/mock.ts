@@ -53,11 +53,15 @@ export const MOCK_CONFIG: AppConfig = {
   server: { host: "127.0.0.1", port: 8787, local_api_key: "" },
   retry: {
     max_retries: 3,
-    base_delay_ms: 500,
-    max_delay_ms: 8000,
     retry_statuses: [408, 429, 500, 502, 503, 529],
-    retry_on_network_error: true,
-    circuit_breaker: { enabled: true, failure_threshold: 5, cooldown_secs: 30 },
+    circuit_breaker: {
+      enabled: true,
+      failure_threshold: 5,
+      open_duration_secs: 3600,
+      probe_interval_secs: 30,
+      recovery_success_threshold: 2,
+      panic_probe_window_secs: 60,
+    },
   },
   providers: [
     {
@@ -166,10 +170,10 @@ export function mockMetrics(): MetricsSnapshot {
 
 export function mockBreakers(): BreakerMap {
   return {
-    openai: { state: "closed", consecutive_failures: 0 },
-    deepseek: { state: "closed", consecutive_failures: 1 },
-    anthropic: { state: "closed", consecutive_failures: 0 },
-    ollama: { state: "half_open", consecutive_failures: 3 },
+    openai: { state: "closed", consecutive_failures: 0, cooldown_remaining_secs: null },
+    deepseek: { state: "closed", consecutive_failures: 1, cooldown_remaining_secs: null },
+    anthropic: { state: "closed", consecutive_failures: 0, cooldown_remaining_secs: null },
+    ollama: { state: "half_open", consecutive_failures: 3, cooldown_remaining_secs: null },
   };
 }
 
