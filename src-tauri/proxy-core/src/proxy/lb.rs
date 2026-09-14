@@ -76,10 +76,6 @@ pub fn select(
     if candidates.is_empty() {
         return None;
     }
-    // 只有一个候选时无需选择
-    if candidates.len() == 1 {
-        return Some(0);
-    }
 
     // 参与选择的候选池（熔断过滤后的 eligible 子集）
     let pool: Vec<usize> = match eligible {
@@ -137,9 +133,9 @@ fn lookup_sticky(
         Stale,
     }
 
-    let verdict = match state.sticky_sessions.get(session_key) {
+    let verdict = match state.sticky_sessions.get_mut(session_key) {
         None => return None,
-        Some(entry) => {
+        Some(mut entry) => {
             // 校验未过期
             if entry.created_at.elapsed().as_secs() >= lb_cfg.sticky.ttl_secs {
                 Verdict::Expired
@@ -152,6 +148,9 @@ fn lookup_sticky(
                 if entry.route_key != expected {
                     Verdict::Stale
                 } else {
+                    // 命中即续期（滑动过期）：持续活跃的长会话不会被 TTL 强制
+                    // 切换上游；仅连续 ttl_secs 内无请求才真正过期
+                    entry.created_at = Instant::now();
                     Verdict::Hit(entry.candidate_index)
                 }
             }
@@ -270,29 +269,27 @@ fn smooth_weighted_round_robin(
         return random_index(candidates.len());
     }
 
-    // cw[i] += w[i]
-    let mut currents: Vec<i64> = Vec::with_capacity(candidates.len());
+    // 整轮「累加 → 取最大 → 减 total」在同一把锁内完成，保证并发下仍是
+    // 严格 Nginx SWRR 序列（逐键原子会被并发交错打破序列不变量）
+    let mut swrr = state.swrr_weights.lock();
+
+    // cw[i] += w[i]，同时取最大者（并列取靠前者，保证确定性）
+    let mut winner = 0;
+    let mut winner_cw = i64::MIN;
     for (i, c) in candidates.iter().enumerate() {
         let key = route_key_for_candidate(model, c);
-        let cell = state
-            .swrr_weights
-            .entry(key)
-            .or_insert_with(|| std::sync::atomic::AtomicI64::new(0));
-        currents.push(cell.fetch_add(weights[i], Ordering::Relaxed) + weights[i]);
-    }
-
-    // 取最大者（并列取靠前者，保证确定性）
-    let mut winner = 0;
-    for i in 1..currents.len() {
-        if currents[i] > currents[winner] {
+        let cw = swrr.entry(key).or_insert(0);
+        *cw += weights[i];
+        if *cw > winner_cw {
+            winner_cw = *cw;
             winner = i;
         }
     }
 
     // cw[winner] -= total
     let winner_key = route_key_for_candidate(model, &candidates[winner]);
-    if let Some(cell) = state.swrr_weights.get(&winner_key) {
-        cell.fetch_sub(total, Ordering::Relaxed);
+    if let Some(cw) = swrr.get_mut(&winner_key) {
+        *cw -= total;
     }
 
     Some(winner)
@@ -363,19 +360,37 @@ fn fastest_response(state: &AppState, candidates: &[Candidate<'_>], model: &str)
         Some(m) => m.saturating_mul(4).saturating_div(5),
     };
 
-    candidates
+    // 存在无新鲜样本的冷候选时，随机挑一个做探测：基线已保证冷候选优先，
+    // 随机化避免多个冷候选按索引顺序被逐个"喂样本"，把探测流量摊开
+    let cold: Vec<usize> = fresh
         .iter()
         .enumerate()
-        .min_by_key(|(i, _)| fresh[*i].unwrap_or(baseline))
+        .filter(|(_, v)| v.is_none())
         .map(|(i, _)| i)
+        .collect();
+    if !cold.is_empty() {
+        let pick = rand::thread_rng().gen_range(0..cold.len());
+        return Some(cold[pick]);
+    }
+
+    Some(
+        fresh
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, v)| v.unwrap_or(baseline))
+            .map(|(i, _)| i)
+            .unwrap_or(0),
+    )
 }
 
 /// 最少在途连接数：选当前并发请求最少的候选。
+///
+/// 平局（常见于全体在途数为 0）随机打散：避免"请求结束 → 下一个请求
+/// 立刻到来"的节奏下流量短期扎堆在列表第一个候选上。
 fn least_connections(state: &AppState, candidates: &[Candidate<'_>], model: &str) -> Option<usize> {
-    candidates
+    let counts: Vec<u64> = candidates
         .iter()
-        .enumerate()
-        .min_by_key(|(_, c)| {
+        .map(|c| {
             let key = route_key_for_candidate(model, c);
             state
                 .in_flight
@@ -383,7 +398,16 @@ fn least_connections(state: &AppState, candidates: &[Candidate<'_>], model: &str
                 .map(|c| c.load(Ordering::Relaxed))
                 .unwrap_or(0)
         })
+        .collect();
+    let min = counts.iter().min()?;
+    let tied: Vec<usize> = counts
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| *v == min)
         .map(|(i, _)| i)
+        .collect();
+    let pick = rand::thread_rng().gen_range(0..tied.len());
+    Some(tied[pick])
 }
 
 // ─────────────────────────── 会话 Key 提取 ───────────────────────────
@@ -555,9 +579,12 @@ pub fn spawn_sticky_cleanup(state: std::sync::Arc<AppState>) -> tokio::task::Joi
             // 回收失效的 SWRR 条目：route_key 不在当前配置中的直接删除
             // （渠道/路由被删后残留的 current_weight 无意义）；
             // 容量上限保护：极端情况下（如配置解析无法覆盖的组合键）整体清空重建。
-            state.swrr_weights.retain(|k, _| valid_keys.contains(k));
-            if state.swrr_weights.len() > SWRR_MAP_MAX {
-                state.swrr_weights.clear();
+            {
+                let mut swrr = state.swrr_weights.lock();
+                swrr.retain(|k, _| valid_keys.contains(k));
+                if swrr.len() > SWRR_MAP_MAX {
+                    swrr.clear();
+                }
             }
         }
     })
@@ -1075,6 +1102,54 @@ mod tests {
         assert_eq!(
             entry.route_key,
             route_key_for_candidate("m", &candidates[idx])
+        );
+    }
+
+    #[test]
+    fn sticky_hit_renews_ttl() {
+        // 命中粘性记录应刷新 created_at（滑动过期）：长会话持续活跃时不被 TTL 切走
+        let mut cfg = AppConfig::default();
+        cfg.providers = vec![
+            ProviderConfig {
+                id: "a".into(),
+                models: vec!["m".into()],
+                ..ProviderConfig::demo()
+            },
+            ProviderConfig {
+                id: "b".into(),
+                models: vec!["m".into()],
+                ..ProviderConfig::demo()
+            },
+        ];
+        let state = make_state();
+        let candidates = make_candidates(&cfg, "m");
+
+        let old = Instant::now() - std::time::Duration::from_secs(100);
+        state.sticky_sessions.insert(
+            "sess-r".into(),
+            crate::proxy::state::StickyEntry {
+                candidate_index: 0,
+                route_key: route_key("m", "a", ""),
+                created_at: old,
+            },
+        );
+
+        let lb = LoadBalanceConfig {
+            enabled: true,
+            strategy: LbStrategy::RoundRobin,
+            sticky: StickyConfig {
+                enabled: true,
+                session_key_source: SessionKeySource::Header("x-session-id".into()),
+                ttl_secs: 1800,
+            },
+        };
+
+        let idx = select(&state, &candidates, "m", Some("sess-r"), &lb, None).unwrap();
+        assert_eq!(idx, 0, "未过期且 route_key 匹配应命中");
+        let entry = state.sticky_sessions.get("sess-r").unwrap();
+        assert!(
+            entry.created_at > old,
+            "命中后 created_at 应被刷新（滑动过期）"
         );
     }
 

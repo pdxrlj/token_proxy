@@ -364,8 +364,12 @@ pub struct AppState {
     ///
     /// 平滑加权轮询的运行状态（Nginx 算法）：每轮 `cw[i] += w[i]`，选出最大者后
     /// `cw[winner] -= Σw`。相比朴素计数器取模，分配序列均匀无突发、权重感知、
-    /// 候选集变化时自然过渡。过期条目由 sticky 清理任务回收。
-    pub swrr_weights: DashMap<String, std::sync::atomic::AtomicI64>,
+    /// 候选集变化时自然过渡。
+    ///
+    /// 整轮「累加 → 取最大 → 减 total」必须在同一把锁内完成：若拆成逐键原子
+    /// 操作，并发请求交错会打破 SWRR 的序列不变量。单轮只涉及几个候选键，
+    /// 锁竞争开销可忽略。过期条目由 sticky 清理任务回收。
+    pub swrr_weights: parking_lot::Mutex<std::collections::HashMap<String, i64>>,
     /// 会话粘性映射：key = session_key → StickyEntry
     pub sticky_sessions: DashMap<String, StickyEntry>,
     /// 在途请求计数：key = `{model}|{provider_id}|{upstream_model}`
@@ -400,7 +404,7 @@ impl AppState {
             sink: Mutex::new(None),
             db: Mutex::new(None),
             route_latency: DashMap::new(),
-            swrr_weights: DashMap::new(),
+            swrr_weights: parking_lot::Mutex::new(std::collections::HashMap::new()),
             sticky_sessions: DashMap::new(),
             in_flight: DashMap::new(),
             user_usage: DashMap::new(),

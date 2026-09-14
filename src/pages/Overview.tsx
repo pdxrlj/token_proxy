@@ -2,7 +2,6 @@ import type { CSSProperties } from "react";
 import { useState } from "react";
 import type { AppData } from "../hooks/useAppData";
 import {
-  Button,
   StatusDot,
   fmtBytes,
   fmtCount,
@@ -41,28 +40,39 @@ function linkClass(state?: BreakerStateName): string {
 export function Overview({ data }: { data: AppData }) {
   const { config, status, metrics, breakers } = data;
   const toast = useToast();
-  const [copied, setCopied] = useState(false);
   const [detail, setDetail] = useState<RequestLog | null>(null);
-
-  const endpoint = status ? `${status.host}:${status.port}` : "…";
   const serverDown = !!status && !status.running;
+  // 地址列表：host 为通配监听时展示本机回环 + 局域网 IP；否则只展示配置的 host
+  const wildcard = !status || ["0.0.0.0", "::", ""].includes(status.host);
+  const localHost = wildcard ? "127.0.0.1" : status.host;
+  const endpoints: { label: string; url: string }[] = [
+    { label: "本机", url: `http://${localHost}:${status?.port ?? ""}/v1` },
+    ...(wildcard && status?.running
+      ? (status.lan_ips ?? []).map((ip) => ({
+          label: "局域网",
+          url: `http://${ip}:${status.port}/v1`,
+        }))
+      : []),
+  ];
+  const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
+  const [addrOpen, setAddrOpen] = useState(false);
+  const copyUrl = async (url: string, idx: number) => {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopiedIdx(idx);
+      toast(`已复制 ${url}`);
+      setTimeout(() => setCopiedIdx(null), 1800);
+    } catch {
+      toast("复制失败，请手动复制", "err");
+    }
+  };
+  const primaryUrl = endpoints[0]?.url ?? "…";
   const successRate =
     metrics.total > 0 ? Math.round((metrics.success / metrics.total) * 100) : 100;
   const cacheHitRate =
     metrics.total > 0 && metrics.cache_hits != null
       ? Math.round((metrics.cache_hits / metrics.total) * 100)
       : 0;
-
-  const copyEndpoint = async () => {
-    try {
-      await navigator.clipboard.writeText(`http://${endpoint}/v1`);
-      setCopied(true);
-      toast("已复制 base_url 到剪贴板");
-      setTimeout(() => setCopied(false), 1800);
-    } catch {
-      toast("复制失败，请手动复制", "err");
-    }
-  };
 
   // 路由链路：routes 优先，未配置的 provider 模型作为 fallback 展示
   const links: { model: string; provider: string; providerName: string; breaker?: BreakerStateName }[] = [];
@@ -105,21 +115,90 @@ export function Overview({ data }: { data: AppData }) {
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
           <span
+            onClick={() => copyUrl(primaryUrl, 0)}
+            title="点击复制"
             className={`pill ${serverDown ? "warn" : "ok"}`}
-            style={{ fontSize: 14, padding: "8px 16px" }}
+            style={{ fontSize: 14, padding: "8px 16px", cursor: "pointer" }}
           >
             <StatusDot color={serverDown ? "rose" : "cyan"} />
             <span className="mono" style={{ fontSize: 13.5 }}>
-              http://{endpoint}/v1
+              {primaryUrl}
             </span>
+            <Copy size={12} style={{ opacity: copiedIdx === 0 ? 1 : 0.3 }} />
           </span>
-          <Button size="sm" onClick={copyEndpoint}>
-            <Copy size={13} />
-            {copied ? "已复制" : "复制地址"}
-          </Button>
-          <span style={{ color: "var(--text-3)", fontSize: 12 }}>
-            任何 OpenAI 兼容客户端把 base_url 指向这里即可
-          </span>
+          {endpoints.length > 1 && (
+            <button
+              onClick={() => setAddrOpen((o) => !o)}
+              style={{
+                background: "none",
+                border: "none",
+                color: "var(--text-3)",
+                fontSize: 11.5,
+                cursor: "pointer",
+                padding: 0,
+                display: "flex",
+                alignItems: "center",
+                gap: 3,
+              }}
+            >
+              本机 / 局域网地址（{endpoints.length}）
+              <span
+                style={{
+                  display: "inline-block",
+                  transition: "transform .15s",
+                  transform: addrOpen ? "rotate(180deg)" : "none",
+                }}
+              >
+                ▾
+              </span>
+            </button>
+          )}
+        </div>
+        {addrOpen && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 3, marginTop: 10 }}>
+            {endpoints.map((e, i) => (
+              <div
+                key={e.url}
+                onClick={() => copyUrl(e.url, i)}
+                title="点击复制"
+                className="mono"
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  fontSize: 12,
+                  cursor: "pointer",
+                  color: "var(--text-2)",
+                  width: "fit-content",
+                  padding: "2px 8px",
+                  borderRadius: 6,
+                  transition: "background .15s",
+                  background:
+                    copiedIdx === i ? "var(--accent-soft, rgba(34,211,238,.12))" : "transparent",
+                }}
+              >
+                <span
+                  style={{
+                    fontSize: 10,
+                    color: "var(--text-3)",
+                    border: "1px solid var(--border)",
+                    borderRadius: 4,
+                    padding: "0 5px",
+                    lineHeight: "16px",
+                    flexShrink: 0,
+                  }}
+                >
+                  {e.label}
+                </span>
+                <span>{e.url}</span>
+                <Copy size={11} style={{ opacity: copiedIdx === i ? 1 : 0.3, flexShrink: 0 }} />
+              </div>
+            ))}
+          </div>
+        )}
+        <div style={{ marginTop: 8, color: "var(--text-3)", fontSize: 11.5 }}>
+          任何 OpenAI 兼容客户端把 base_url 指向这里即可
+          {serverDown && <span style={{ color: "var(--rose)" }}> · 服务未运行</span>}
         </div>
         {status?.server_error && (
           <div style={{ marginTop: 12, fontSize: 12, color: "var(--rose)" }}>

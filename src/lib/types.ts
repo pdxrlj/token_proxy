@@ -213,6 +213,8 @@ export interface StatusDto {
   total_requests: number;
   /** 服务启动失败原因（如端口被占用）；正常运行时为 null */
   server_error?: string | null;
+  /** 本机局域网 IPv4 地址（不含回环），供总览页展示局域网访问入口 */
+  lan_ips?: string[];
 }
 
 export type BreakerStateName = "closed" | "open" | "half_open";

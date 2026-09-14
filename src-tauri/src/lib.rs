@@ -217,7 +217,47 @@ async fn get_status(
         routes,
         total_requests: state.metrics.snapshot().total,
         server_error: state.server.last_error().await,
+        lan_ips: lan_ipv4_addrs(),
     })
+}
+
+/// 本机对外的局域网 IPv4 地址，供总览页展示访问入口。
+///
+/// 过滤规则：排除回环与 `169.254.x.x` 链路本地地址（APIPA，来自断开或
+/// 虚拟网卡，不可用于局域网访问），只保留私有网段（10/8、172.16/12、192.168/16）。
+/// 默认路由（当前实际联网网卡）的地址排在首位。
+fn lan_ipv4_addrs() -> Vec<String> {
+    let mut v: Vec<String> = local_ip_address::list_afinet_netifas()
+        .map(|ifs| {
+            let mut v: Vec<String> = ifs
+                .into_iter()
+                .filter_map(|(_, ip)| match ip {
+                    std::net::IpAddr::V4(v4)
+                        if !v4.is_loopback()
+                            && !v4.is_link_local()
+                            && v4.is_private() =>
+                    {
+                        Some(v4.to_string())
+                    }
+                    _ => None,
+                })
+                .collect();
+            v.sort();
+            v.dedup();
+            v
+        })
+        .unwrap_or_default();
+    // 默认路由地址（出网流量实际使用的网卡）置顶
+    if let Ok(primary) = local_ip_address::local_ip() {
+        if let std::net::IpAddr::V4(p) = primary {
+            let s = p.to_string();
+            if let Some(pos) = v.iter().position(|x| *x == s) {
+                v.remove(pos);
+                v.insert(0, s);
+            }
+        }
+    }
+    v
 }
 
 #[tauri::command]

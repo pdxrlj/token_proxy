@@ -131,7 +131,7 @@ export function Logs({ data }: { data: AppData }) {
                       {r.cache_hit ? (
                         <span className="chip" style={{ fontSize: 11, padding: "2px 8px", color: "var(--green)", background: "var(--green-soft, rgba(16,185,129,.12))" }}>
                           {r.cached_tokens != null && r.cached_tokens > 0 && r.tokens_in
-                            ? `命中 ${Math.round((r.cached_tokens / r.tokens_in) * 100)}%`
+                            ? `${Math.round((r.cached_tokens / r.tokens_in) * 100)}%`
                             : "命中"}
                         </span>
                       ) : (

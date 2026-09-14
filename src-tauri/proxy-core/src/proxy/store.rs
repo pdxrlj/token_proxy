@@ -172,4 +172,7 @@ pub struct StatusDto {
     /// 加 `default` 是为了兼容旧版前端/配置中不含该字段的场景。
     #[serde(default)]
     pub server_error: Option<String>,
+    /// 本机局域网 IPv4 地址（不含回环）；供前端展示局域网访问入口。
+    #[serde(default)]
+    pub lan_ips: Vec<String>,
 }

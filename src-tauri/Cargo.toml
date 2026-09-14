@@ -24,6 +24,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 notify = "7"
 token-proxy-core = { path = "proxy-core" }
+# 枚举本机网卡：总览页展示局域网访问地址
+local-ip-address = "0.6"
 
 [profile.release]
 panic = "abort"
