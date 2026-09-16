@@ -6,9 +6,10 @@
 //! 本任务按 `probe_interval_secs` 轮询所有到期熔断器，主动发试探请求；
 //! 与被动半开共用同一状态机（单探测名额 CAS 保证同一时刻只有一个试探在途）。
 //!
-//! # 已知限制（依赖被动半开兜底）
-//! - embeddings 等非对话路由的试探可能 404 → 保持熔断，等真实请求半开恢复
-//! - 个别上游拒绝 `max_tokens=1` → 同样保持熔断
+//! # 探活方式
+//! 使用 `GET /models` 端点探活：不消耗 token、不计入用量，同时验证上游可达性
+//! 与 API Key 有效性。个别上游不支持 `/models` 端点时返回非 2xx，探活保持熔断，
+//! 依赖被动半开（真实请求）兜底恢复。
 
 use crate::proxy::circuit::{BreakerState, CircuitBreaker};
 use crate::proxy::config::ProviderConfig;
@@ -87,28 +88,18 @@ pub async fn probe_round(state: &Arc<AppState>) -> usize {
         }
 
         // route_key = model|provider_id|upstream_model
-        let Some((model, provider_id, upstream_model)) = parse_route_key(&route_key) else {
+        let Some((_model, provider_id, _upstream_model)) = parse_route_key(&route_key) else {
             continue;
         };
 
         // 渠道已删除/禁用：清理残留的熔断器条目
-        let Some(provider) = providers
-            .iter()
-            .find(|p| p.id == provider_id && p.enabled)
-        else {
+        let Some(provider) = providers.iter().find(|p| p.id == provider_id && p.enabled) else {
             state.breakers.remove(&route_key);
             continue;
         };
 
-        // 试探模型名：显式路由的 upstream_model，否则原模型名
-        let probe_model = if upstream_model.is_empty() {
-            model
-        } else {
-            upstream_model
-        };
-
         let before = breaker.status().state;
-        match send_probe(state, provider, probe_model).await {
+        match send_probe(state, provider).await {
             Ok(()) => {
                 breaker.on_success(&cb_cfg);
                 let after = breaker.status().state;
@@ -129,27 +120,23 @@ pub async fn probe_round(state: &Arc<AppState>) -> usize {
     recovered
 }
 
-/// 发送试探请求：`POST {base_url}/chat/completions`，`max_tokens=1`。
+/// 发送试探请求：`GET {base_url}/models`。
 ///
+/// 不消耗 token、不计入用量，仅验证上游可达性与 API Key 有效性。
 /// 返回 `Ok(())` 表示 2xx（健康）；`Err(reason)` 表示未恢复（非 2xx 或网络错误）。
-async fn send_probe(
-    state: &Arc<AppState>,
-    provider: &ProviderConfig,
-    model: &str,
-) -> Result<(), String> {
-    let url = provider.endpoint("chat/completions");
-    let body = probe_body(model);
+async fn send_probe(state: &Arc<AppState>, provider: &ProviderConfig) -> Result<(), String> {
+    let url = provider.endpoint("models");
     let headers = build_upstream_headers(&HeaderMap::new(), provider);
 
     let mut req = state
         .http
-        .post(&url)
+        .get(&url)
         .timeout(Duration::from_secs(PROBE_TIMEOUT_SECS));
     for (name, value) in headers {
         req = req.header(name, value);
     }
 
-    match req.json(&body).send().await {
+    match req.send().await {
         Ok(resp) => {
             if resp.status().is_success() {
                 Ok(())
@@ -159,15 +146,6 @@ async fn send_probe(
         }
         Err(e) => Err(format!("probe network error: {e}")),
     }
-}
-
-/// 构造试探请求体。
-fn probe_body(model: &str) -> serde_json::Value {
-    serde_json::json!({
-        "model": model,
-        "messages": [{ "role": "user", "content": "ping" }],
-        "max_tokens": 1,
-    })
 }
 
 /// 解析 route_key：`model|provider_id|upstream_model`。
@@ -187,17 +165,6 @@ fn parse_route_key(key: &str) -> Option<(&str, &str, &str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn probe_body_shape() {
-        let b = probe_body("glm-4-plus");
-        assert_eq!(b["model"], "glm-4-plus");
-        assert_eq!(b["max_tokens"], 1);
-        assert_eq!(b["messages"][0]["role"], "user");
-        assert_eq!(b["messages"][0]["content"], "ping");
-        // 试探请求必须极小：不带 stream，避免误触流式路径
-        assert!(b.get("stream").is_none());
-    }
 
     #[test]
     fn route_key_parsing() {
