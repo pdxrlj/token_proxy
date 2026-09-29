@@ -90,6 +90,41 @@ impl Default for LoadBalanceConfig {
     }
 }
 
+// ─────────────────────────── 客户端兼容层配置 ───────────────────────────
+
+/// Claude Code / Codex 等客户端的 API 兼容配置。
+///
+/// 代理在 `/v1/messages`（Anthropic API，Claude Code）与 `/v1/responses`
+/// （OpenAI Responses API，Codex）上提供协议翻译：请求先翻译成
+/// chat completions 格式再走正常的路由 / 负载均衡 / 熔断 / 重试链路，
+/// 响应再翻译回对应协议。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CompatConfig {
+    /// Claude Code 请求的模型（如 `claude-sonnet-4-5-20250929`）未命中任何路由时，
+    /// 改写为该模型再走正常路由解析——让 `claude-*` 模型名透明落到代理已配置的
+    /// 模型上。空字符串表示不改写（未命中即返回 404）。
+    pub claude_code_default_model: String,
+    /// Codex（Responses API）同上：请求模型未命中路由时的兜底模型。
+    pub codex_default_model: String,
+    /// Claude Code 的模型上下文窗口（tokens），一键接入时写为
+    /// `CLAUDE_CODE_MAX_CONTEXT_TOKENS` 环境变量。
+    ///
+    /// Claude Code 对不在其内置模型目录里的模型（如 glm-*）按 200k 假设并在该处
+    /// 自动压缩；模型实际窗口更大时在此填写，避免过早压缩。0 = 不写（沿用 200k）。
+    pub claude_code_max_context_tokens: u64,
+}
+
+impl Default for CompatConfig {
+    fn default() -> Self {
+        Self {
+            claude_code_default_model: String::new(),
+            codex_default_model: String::new(),
+            claude_code_max_context_tokens: 0,
+        }
+    }
+}
+
 // ─────────────────────────── 顶层配置 ───────────────────────────
 
 /// 顶层应用配置。存为 JSON，GUI 编辑后写回并热重载。
@@ -102,6 +137,9 @@ pub struct AppConfig {
     pub routes: Vec<RouteConfig>,
     #[serde(default)]
     pub load_balance: LoadBalanceConfig,
+    /// 客户端兼容层（Claude Code / Codex）配置
+    #[serde(default)]
+    pub compat: CompatConfig,
     /// 用户列表（每人持有一个 API Key，可选携带；用于配额限制）
     ///
     /// `alias = "api_keys"` 用于读取改名前的旧配置文件，避免升级后用户数据丢失。
@@ -117,6 +155,7 @@ impl Default for AppConfig {
             providers: vec![ProviderConfig::demo()],
             routes: vec![],
             load_balance: LoadBalanceConfig::default(),
+            compat: CompatConfig::default(),
             users: vec![],
         }
     }
@@ -381,10 +420,17 @@ impl AppConfig {
     /// 1. **精确路由匹配**：收集 `routes` 中 `model` 精确匹配的条目（排除 `disabled`）
     /// 2. **隐式候选回退**：若无精确路由命中，扫描 `providers[].models` 作为隐式候选
     ///
+    /// # 去重
+    /// route_key（`model|provider_id|upstream_model`，与 `lb::route_key` 一致）
+    /// 相同的候选只保留首条：SWRR current_weight、熔断器、在途计数、延迟统计
+    /// 全部以 route_key 为键，重复候选会共享同一份状态——SWRR 的并列取靠后
+    /// 会使权重完全反转、流量塌缩到最后一条上。
+    ///
     /// # 返回
     /// 候选列表（可能为空）。同一模型可有多条路由，形成负载均衡候选集。
     pub fn resolve_candidates(&self, model: &str) -> Vec<Candidate<'_>> {
         let mut result = Vec::new();
+        let mut seen = std::collections::HashSet::new();
 
         // 精确路由匹配
         for (i, route) in self.routes.iter().enumerate() {
@@ -396,6 +442,11 @@ impl AppConfig {
                 .iter()
                 .find(|p| p.id == route.provider && p.enabled)
             {
+                let key = format!("{model}|{}|{}", p.id, route.upstream_model);
+                if !seen.insert(key.clone()) {
+                    tracing::debug!(model, provider = %p.id, upstream_model = %route.upstream_model, "duplicate route_key, keeping first route only");
+                    continue;
+                }
                 result.push(Candidate {
                     provider: p,
                     route: Some(route),
@@ -408,6 +459,11 @@ impl AppConfig {
         if result.is_empty() {
             for p in self.providers.iter().filter(|p| p.enabled) {
                 if p.models.iter().any(|m| m == model) {
+                    let key = format!("{model}|{}|", p.id);
+                    if !seen.insert(key.clone()) {
+                        tracing::debug!(model, provider = %p.id, "duplicate implicit candidate, keeping first only");
+                        continue;
+                    }
                     result.push(Candidate {
                         provider: p,
                         route: None,
@@ -560,6 +616,60 @@ mod tests {
         let candidates = cfg.resolve_candidates("m1");
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].provider.id, "a");
+    }
+
+    #[test]
+    fn resolve_candidates_dedups_identical_route_keys() {
+        // 两条 model+provider+upstream_model 完全相同、仅权重不同的路由：
+        // SWRR current_weight / 熔断器 / 在途计数都以 route_key 为键，
+        // 重复候选共享状态会导致权重完全反转、流量塌缩——解析期去重保留首条。
+        let cfg = AppConfig {
+            providers: vec![ProviderConfig {
+                id: "p".into(),
+                ..ProviderConfig::demo()
+            }],
+            routes: vec![
+                RouteConfig {
+                    model: "m".into(),
+                    provider: "p".into(),
+                    upstream_model: "u".into(),
+                    weight: 9,
+                    ..Default::default()
+                },
+                RouteConfig {
+                    model: "m".into(),
+                    provider: "p".into(),
+                    upstream_model: "u".into(),
+                    weight: 1,
+                    ..Default::default()
+                },
+            ],
+            ..AppConfig::default()
+        };
+
+        let candidates = cfg.resolve_candidates("m");
+        assert_eq!(candidates.len(), 1, "重复 route_key 的候选应被去重");
+        assert_eq!(candidates[0].route.unwrap().weight, 9, "应保留首条路由");
+
+        // upstream_model 不同的路由不算重复，仍然都保留
+        let cfg2 = AppConfig {
+            routes: vec![
+                RouteConfig {
+                    model: "m".into(),
+                    provider: "p".into(),
+                    upstream_model: "u1".into(),
+                    ..Default::default()
+                },
+                RouteConfig {
+                    model: "m".into(),
+                    provider: "p".into(),
+                    upstream_model: "u2".into(),
+                    ..Default::default()
+                },
+            ],
+            ..cfg
+        };
+        assert_eq!(cfg2.resolve_candidates("m").len(), 2);
     }
 
     #[test]

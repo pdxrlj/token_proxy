@@ -136,6 +136,11 @@ export const MOCK_CONFIG: AppConfig = {
       ttl_secs: 1800,
     },
   },
+  compat: {
+    claude_code_default_model: "",
+    codex_default_model: "",
+    claude_code_max_context_tokens: 0,
+  },
 };
 
 export function mockStatus(): StatusDto {

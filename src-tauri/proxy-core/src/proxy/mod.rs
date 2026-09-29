@@ -11,9 +11,11 @@
 //! - [`state`]    — 全局共享状态与指标
 //! - [`store`]    — 配置持久化与校验
 //! - [`db`]       — SQLite 请求日志存储
+//! - [`compat`]   — 客户端协议兼容层（Claude Code / Codex → chat completions）
 
 pub mod api;
 pub mod circuit;
+pub mod compat;
 pub mod config;
 pub mod db;
 pub mod headers;

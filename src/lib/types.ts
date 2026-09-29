@@ -114,6 +114,36 @@ export interface LoadBalanceConfig {
   sticky: StickyConfig;
 }
 
+/** 客户端兼容层配置（Claude Code / Codex） */
+export interface CompatConfig {
+  /** Claude Code 请求的模型未命中路由时的兜底模型；空 = 不改写 */
+  claude_code_default_model: string;
+  /** Codex（Responses API）请求的模型未命中路由时的兜底模型；空 = 不改写 */
+  codex_default_model: string;
+  /** Claude Code 模型的上下文窗口（tokens），接入时写为 CLAUDE_CODE_MAX_CONTEXT_TOKENS；0 = 不写 */
+  claude_code_max_context_tokens: number;
+}
+
+/** 单个 CLI 工具的一键接入状态 */
+export interface CompatToolStatus {
+  /** CLI 配置文件路径 */
+  path: string;
+  /** 是否已指向本代理 */
+  integrated: boolean;
+  /** CLI 当前指向的 API 地址；未配置时为 null */
+  base_url: string | null;
+  /** 是否存在接入前的备份（断开时自动恢复） */
+  has_backup: boolean;
+}
+
+/** Claude Code / Codex 一键接入状态 */
+export interface CompatIntegrationStatus {
+  /** 本代理对外的地址（监听地址归一化后） */
+  base_url: string;
+  claude: CompatToolStatus;
+  codex: CompatToolStatus;
+}
+
 // ─────────────────────────── 顶层配置 ───────────────────────────
 
 /** 顶层应用配置，存为 JSON，GUI 编辑后写回并热重载 */
@@ -123,6 +153,7 @@ export interface AppConfig {
   providers: ProviderConfig[];
   routes: RouteConfig[];
   load_balance: LoadBalanceConfig;
+  compat: CompatConfig;
   users?: UserConfig[];
 }
 
@@ -258,6 +289,11 @@ export const DEFAULT_CONFIG: AppConfig = {
       session_key_source: { type: "first_user_message" },
       ttl_secs: 1800,
     },
+  },
+  compat: {
+    claude_code_default_model: "",
+    codex_default_model: "",
+    claude_code_max_context_tokens: 0,
   },
 };
 

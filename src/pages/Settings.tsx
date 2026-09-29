@@ -1,6 +1,11 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { AppData } from "../hooks/useAppData";
-import type { AppConfig, LbStrategy, SessionKeySource } from "../lib/types";
+import type {
+  AppConfig,
+  CompatIntegrationStatus,
+  LbStrategy,
+  SessionKeySource,
+} from "../lib/types";
 import { api } from "../lib/tauri";
 import { Button, Field, Switch, useToast } from "../components/ui";
 import {
@@ -11,7 +16,10 @@ import {
   Network,
   RotateCcw,
   Server,
+  Sparkles,
+  Unplug,
   Upload,
+  Zap,
 } from "lucide-react";
 
 const DEFAULT_STATUSES = [408, 429, 500, 502, 503, 529];
@@ -29,6 +37,42 @@ export function Settings({ data }: { data: AppData }) {
   const [importSummary, setImportSummary] = useState<string | null>(null);
   const [exportPath, setExportPath] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+
+  // Claude Code / Codex 一键接入状态
+  const [compat, setCompat] = useState<CompatIntegrationStatus | null>(null);
+  const [compatBusy, setCompatBusy] = useState<string | null>(null);
+  useEffect(() => {
+    api.getCompatStatus().then(setCompat).catch(() => {});
+  }, []);
+
+  const doCompat = async (
+    action: "integrate" | "disconnect",
+    target: "claude" | "codex",
+  ) => {
+    setCompatBusy(`${action}:${target}`);
+    try {
+      const next =
+        action === "integrate"
+          ? await api.compatIntegrate(target)
+          : await api.compatDisconnect(target);
+      setCompat(next);
+      const tool = target === "claude" ? "Claude Code" : "Codex";
+      if (action === "disconnect") {
+        toast(`${tool} 已断开，配置已恢复到接入前`);
+      } else {
+        const refreshing = compat?.[target]?.integrated;
+        toast(
+          refreshing
+            ? `${tool} 配置已刷新（模型槽位等已按当前代理配置更新），重启 ${tool} 生效`
+            : `${tool} 已接入本代理，重启 ${tool} 后生效`,
+        );
+      }
+    } catch (e) {
+      toast(`操作失败：${e}`, "err");
+    } finally {
+      setCompatBusy(null);
+    }
+  };
 
   const set = (patch: unknown) => {
     setDraft((d: typeof config) => merge(d, patch));
@@ -453,6 +497,157 @@ export function Settings({ data }: { data: AppData }) {
         )}
       </div>
 
+      {/* 客户端兼容层：Claude Code / Codex */}
+      <div className="card">
+        <div className="card-header">
+          <span className="card-title" style={{ display: "flex", alignItems: "center", gap: 7 }}>
+            <Sparkles size={13} /> 客户端兼容（Claude Code / Codex）
+          </span>
+        </div>
+        <p style={{ color: "var(--text-3)", fontSize: 12.5, marginBottom: 12, lineHeight: 1.7 }}>
+          代理在 <span className="mono">/v1/messages</span>（Anthropic 协议）与{" "}
+          <span className="mono">/v1/responses</span>（OpenAI Responses 协议）上提供协议翻译，
+          Claude Code / Codex 可把官方 API 地址指向本代理。请求模型未配置路由时改写为下面的兜底模型，
+          留空则不改写（未命中路由返回 404）。
+        </p>
+        <Field
+          label="Claude Code 兜底模型"
+          help="claude-* 模型名未命中路由时改写为该模型，走其配置的渠道"
+        >
+          <input
+            className="input mono"
+            value={draft.compat?.claude_code_default_model ?? ""}
+            placeholder="留空 = 不改写"
+            onChange={(e) =>
+              set({ compat: { ...draft.compat, claude_code_default_model: e.target.value } })
+            }
+          />
+        </Field>
+        <Field label="Codex 兜底模型" help="gpt-* / codex 模型名未命中路由时改写为该模型">
+          <input
+            className="input mono"
+            value={draft.compat?.codex_default_model ?? ""}
+            placeholder="留空 = 不改写"
+            onChange={(e) => set({ compat: { ...draft.compat, codex_default_model: e.target.value } })}
+          />
+        </Field>
+        <Field
+          label="Claude Code 上下文窗口（tokens）"
+          help="模型不在 Claude Code 内置目录时（如 glm-*），它按 200k 假设并在该处自动压缩；模型实际窗口更大时在此填写，接入时写为 CLAUDE_CODE_MAX_CONTEXT_TOKENS。0 = 不写"
+        >
+          <input
+            className="input mono"
+            type="number"
+            min={0}
+            value={draft.compat?.claude_code_max_context_tokens ?? 0}
+            placeholder="0 = 不设置"
+            onChange={(e) =>
+              set({
+                compat: {
+                  ...draft.compat,
+                  claude_code_max_context_tokens: Math.max(0, Math.floor(Number(e.target.value) || 0)),
+                },
+              })
+            }
+          />
+        </Field>
+
+        {/* 一键接入（cc-switch 同款思路：直接替用户改写 CLI 本地配置文件） */}
+        <div style={{ height: 10 }} />
+        <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 8 }}>一键接入</div>
+        {(["claude", "codex"] as const).map((target) => {
+          const label = target === "claude" ? "Claude Code" : "Codex";
+          const st = compat?.[target];
+          const busy =
+            compatBusy === `integrate:${target}` ||
+            compatBusy === `disconnect:${target}`;
+          return (
+            <div
+              key={target}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 10,
+                padding: "10px 12px",
+                background: "var(--bg-2)",
+                borderRadius: 10,
+                marginBottom: 8,
+              }}
+            >
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13, display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ fontWeight: 600 }}>{label}</span>
+                  {st && (
+                    <span
+                      style={{
+                        fontSize: 11,
+                        padding: "1px 8px",
+                        borderRadius: 99,
+                        background: st.integrated ? "var(--green-soft, var(--bg-1))" : "var(--bg-1)",
+                        color: st.integrated ? "var(--green)" : "var(--text-3)",
+                      }}
+                    >
+                      {st.integrated ? "已接入" : st.base_url ? "指向其它地址" : "未接入"}
+                    </span>
+                  )}
+                </div>
+                <div
+                  className="mono"
+                  style={{
+                    fontSize: 11,
+                    color: "var(--text-3)",
+                    marginTop: 3,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                  title={st?.path}
+                >
+                  {st ? st.path : "正在检测…"}
+                </div>
+              </div>
+              {st?.integrated ? (
+                <>
+                  <Button onClick={() => doCompat("integrate", target)} disabled={busy}>
+                    <RotateCcw size={13} /> 刷新
+                  </Button>
+                  <Button onClick={() => doCompat("disconnect", target)} disabled={busy}>
+                    <Unplug size={13} /> 断开
+                  </Button>
+                </>
+              ) : (
+                <Button onClick={() => doCompat("integrate", target)} disabled={busy}>
+                  <Zap size={13} /> 一键接入
+                </Button>
+              )}
+            </div>
+          );
+        })}
+        <p style={{ color: "var(--text-3)", fontSize: 12, marginTop: 6, lineHeight: 1.7 }}>
+          一键接入会直接改写 CLI 本地配置：Claude Code 写入{" "}
+          <span className="mono">~/.claude/settings.json</span>，Codex 写入{" "}
+          <span className="mono">~/.codex/config.toml</span> 与{" "}
+          <span className="mono">auth.json</span>（其余配置原样保留，接入前自动备份为{" "}
+          <span className="mono">*.tokenproxy.bak</span>，断开时自动恢复）。改写后需重启
+          Claude Code / Codex 生效。
+          <br />
+          模型选择：接入后代理的<b>全部模型</b>会注册进 Claude Code 的{" "}
+          <span className="mono">/model</span> 选择器（Default = 上面的兜底模型），每个模型
+          映射到 Claude Code 已知的通用模型行为，<b>不会出现「isn't described by this
+          version's model catalog」启动警告</b>。代理模型变更后点「刷新」同步。
+          <br />
+          若模型实际上下文窗口与映射档位不同，用上面的「上下文窗口」覆盖（如 1M 填
+          1000000）；也可在模型名后加 <span className="mono">[1m]</span>，代理能识别该后缀并正确路由。
+        </p>
+        <p style={{ color: "var(--text-3)", fontSize: 12, marginTop: 10 }}>
+          手动接入（备用）：Claude Code 设置环境变量{" "}
+          <span className="mono">ANTHROPIC_BASE_URL=http://127.0.0.1:端口</span>；Codex 在{" "}
+          <span className="mono">~/.codex/config.toml</span> 中把 provider 的{" "}
+          <span className="mono">base_url</span> 指向 <span className="mono">http://127.0.0.1:端口/v1</span>。
+          详见 README。
+        </p>
+      </div>
+
       {/* 配置导入导出 */}
       <div className="card">
         <div className="card-header">
@@ -575,16 +770,25 @@ function makeSessionKeySource(type: string, prev: SessionKeySource | undefined):
  */
 function migrateCb(cfg: AppConfig): AppConfig {
   const cb = cfg.retry?.circuit_breaker;
-  if (!cb) return cfg;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const anyCb = cb as any;
-  if (anyCb.cooldown_secs != null && anyCb.open_duration_secs == null) {
-    anyCb.open_duration_secs = anyCb.cooldown_secs;
-    delete anyCb.cooldown_secs;
+  if (cb) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const anyCb = cb as any;
+    if (anyCb.cooldown_secs != null && anyCb.open_duration_secs == null) {
+      anyCb.open_duration_secs = anyCb.cooldown_secs;
+      delete anyCb.cooldown_secs;
+    }
+    if (anyCb.open_duration_secs == null) anyCb.open_duration_secs = 3600;
+    if (anyCb.probe_interval_secs == null) anyCb.probe_interval_secs = 30;
+    if (anyCb.recovery_success_threshold == null) anyCb.recovery_success_threshold = 2;
+    if (anyCb.panic_probe_window_secs == null) anyCb.panic_probe_window_secs = 60;
   }
-  if (anyCb.open_duration_secs == null) anyCb.open_duration_secs = 3600;
-  if (anyCb.probe_interval_secs == null) anyCb.probe_interval_secs = 30;
-  if (anyCb.recovery_success_threshold == null) anyCb.recovery_success_threshold = 2;
-  if (anyCb.panic_probe_window_secs == null) anyCb.panic_probe_window_secs = 60;
+  // 旧配置快照可能没有 compat 段（Rust 端 serde default 会补，前端兜底一次）
+  if (!cfg.compat) {
+    cfg.compat = {
+      claude_code_default_model: "",
+      codex_default_model: "",
+      claude_code_max_context_tokens: 0,
+    };
+  }
   return cfg;
 }

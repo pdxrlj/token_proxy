@@ -328,7 +328,8 @@ impl Default for RouteLatencyStats {
 
 /// 会话粘性映射条目。
 ///
-/// 记录某会话上次选中的候选索引，用于重试/多轮对话时路由到同一上游。
+/// 记录某「会话 + 模型」上次选中的候选索引（映射键见 `lb::sticky_map_key`），
+/// 用于重试/多轮对话时路由到同一上游；同一会话请求多个模型时各自独立记录。
 #[derive(Debug, Clone)]
 pub struct StickyEntry {
     /// 选中的候选索引

@@ -10,6 +10,8 @@
 
 - OpenAI 兼容 API：`/v1/models`、`/v1/chat/completions`、`/v1/completions`、
   `/v1/embeddings`、`/v1/responses`，其余 `/v1/*` 透传
+- **Claude Code / Codex 兼容层**：`/v1/messages`（Anthropic 协议）、
+  `/v1/responses`（OpenAI Responses 协议）协议翻译，请求模型可兜底映射到代理已配置的模型
 - SSE 流式（`stream: true`）逐行转发，断流返回错误事件，自动统计 token 用量
 - 失败重试：可配置重试次数/退避/可重试状态码；网络错误、429、5xx 自动重试，
   4xx 业务错误不重试；指数退避 + 抖动
@@ -65,6 +67,7 @@ Tauri 2 桌面壳 (React)
    ▼
 proxy-core (Rust, 127.0.0.1:8787)
    ├─ /v1/* OpenAI 兼容端点（SSE 流式透传）
+   ├─ compat 协议翻译层：/v1/messages（Claude Code）、/v1/responses（Codex）
    ├─ 路由表 → Provider 适配（base_url + api_key + 参数改写）
    ├─ 重试循环：指数退避 + 抖动（429/5xx/网络错误）
    ├─ 熔断器（连续失败阈值 → 冷却 → 半开试探）
@@ -121,6 +124,74 @@ curl http://127.0.0.1:8787/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}'
 ```
+
+## 接入 Claude Code / Codex
+
+代理内置协议翻译层：Claude Code（Anthropic Messages API）与 Codex（OpenAI
+Responses API）的请求会先翻译成 chat completions，再走正常的路由 / 负载均衡 /
+熔断 / 重试链路，响应（含 SSE 流式与工具调用）翻译回各自协议。翻译层只在本地
+生效，不改变上游行为。
+
+### 一键接入（推荐）
+
+在「重试与设置 → 客户端兼容（Claude Code / Codex）」里：
+
+1. 配置**兜底模型**（如 `glm-4.6`）：CLI 请求的 `claude-*` / `gpt-*` 模型名
+   未命中路由时改写为该模型；为具体模型名显式配置路由则优先于兜底
+2. 点击对应工具的**「一键接入」**：直接改写 CLI 本地配置并指向本代理——
+   - Claude Code：`~/.claude/settings.json` 合并 `ANTHROPIC_BASE_URL` /
+     `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_MODEL`，其余配置原样保留；旧版的
+     `ANTHROPIC_DEFAULT_OPUS/SONNET/HAIKU_MODEL` 槽位已废弃（会在 `/model`
+     里生成 Custom Opus/Sonnet/Haiku 行并吞掉同模型的 modelPicker 行），
+     接入/刷新时自动移除
+   - Codex：`~/.codex/config.toml` 写入 `model_provider`、`model`（默认模型）与
+     `[model_providers.tokenproxy]`（toml_edit 保格式改写，用户注释与其它配置不受
+     影响），`~/.codex/auth.json` 写入 `OPENAI_API_KEY`
+3. 重启 Claude Code / Codex 即生效
+
+**模型选择**：接入时把代理的全部模型通过 settings.json 的 `modelPicker.options`
+注册进 Claude Code 的 `/model` 选择器（Default = 兜底模型），每行用 `behavesAs`
+映射到 Claude Code 已知的通用档位（prompt profile / 能力 / effort 默认值），
+因此**不会出现 "isn't described by this version's model catalog" 启动警告**。
+代理侧模型变更后点「刷新」同步。注意 `modelPicker` 在 Claude Code 侧不跨来源
+合并：若你手工维护过自己的 modelPicker，接入会整体覆盖（快照可恢复）。
+
+**上下文窗口**：默认按映射档位的窗口处理；模型实际窗口不同（如 1M）时，
+在「客户端兼容」里填**上下文窗口**（tokens）刷新接入，会写为
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS`；也可以在模型名后加 `[1m]` 声明 1M，
+代理能识别该后缀并按去掉后缀的名字路由。
+
+接入前原文件自动备份为 `*.tokenproxy.bak`（重复接入不覆盖最初的备份），
+点「断开」自动从备份恢复；无备份时仅移除本代理写入的键。
+
+### 手动接入（备用）
+
+```bash
+# Claude Code
+$env:ANTHROPIC_BASE_URL = "http://127.0.0.1:8787"
+$env:ANTHROPIC_AUTH_TOKEN = "本地访问令牌（未设置令牌可留空串）"
+claude
+```
+
+Codex 编辑 `~/.codex/config.toml`：
+
+```toml
+model_provider = "tokenproxy"
+
+[model_providers.tokenproxy]
+name = "token proxy"
+base_url = "http://127.0.0.1:8787/v1"
+env_key = "TOKENPROXY_API_KEY"   # 本地访问令牌；未设置令牌时可用任意值
+wire_api = "responses"           # 由代理翻译为 chat completions
+```
+
+其它说明：
+
+- `/v1/messages/count_tokens` 同样支持（按字节数粗估，不消耗上游）
+- `x-api-key` 与 `Authorization: Bearer` 两种鉴权头均可
+- `/v1/responses` 请求一律翻译为 chat completions 后转发（上游只需 OpenAI
+  chat 兼容）；流式翻译会给上游附加 `stream_options: {"include_usage": true}`
+  以获取真实 token 用量，个别严格校验字段的上游如不支持，请反馈或关闭该渠道的流式。
 
 ## 常见问题
 

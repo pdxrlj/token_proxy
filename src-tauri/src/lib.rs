@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+mod compat_setup;
+
 use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
 use token_proxy_core::proxy::config::AppConfig;
@@ -156,6 +158,123 @@ async fn import_config(
 }
 
 /// 重置用户的已用请求数（传 null 表示重置全部）
+/// 归一化对外代理地址与令牌：0.0.0.0 等监听地址对外不可直连，改写为 127.0.0.1；
+/// 本地令牌为空时用占位值（代理未启用鉴权时任意义字符串均可）。
+fn compat_target(state: &AppState) -> (String, String) {
+    let cfg = state.config.read();
+    let host = match cfg.server.host.trim() {
+        "" | "0.0.0.0" | "::" => "127.0.0.1",
+        h => h,
+    };
+    let token = match cfg.server.local_api_key.trim() {
+        "" => compat_setup::PLACEHOLDER_TOKEN.to_string(),
+        t => t.to_string(),
+    };
+    (format!("http://{}:{}", host, cfg.server.port), token)
+}
+
+/// 代理当前可服务的模型名列表（显式路由在前，渠道模型列表在后，去重）。
+///
+/// 供一键接入写 CLI 的模型槽位（Claude Code `/model` 选择器、Codex 默认模型），
+/// 与 `/v1/models` 的口径一致（额外包含路由项，路由可直接指向未在渠道
+/// models 里列出的上游模型名）。
+fn proxy_model_names(cfg: &AppConfig) -> Vec<String> {
+    fn push(distinct: &mut Vec<String>, m: &str) {
+        if !m.is_empty() && !distinct.iter().any(|x| x == m) {
+            distinct.push(m.to_string());
+        }
+    }
+    let mut out = Vec::new();
+    for r in &cfg.routes {
+        if r.disabled {
+            continue;
+        }
+        if cfg.providers.iter().any(|p| p.id == r.provider && p.enabled) {
+            push(&mut out, &r.model);
+        }
+    }
+    for p in cfg.providers.iter().filter(|p| p.enabled) {
+        for m in &p.models {
+            push(&mut out, m);
+        }
+    }
+    out
+}
+
+/// 组装两个 CLI 工具的接入状态
+fn compat_status_value(state: &Arc<AppState>) -> Result<serde_json::Value, String> {
+    let (base, _) = compat_target(state);
+    let home = compat_setup::home_dir()?;
+    let claude = compat_setup::claude_status(&home, &base);
+    let codex = compat_setup::codex_status(&home, &format!("{base}/v1"));
+    Ok(serde_json::json!({
+        "base_url": base,
+        "claude": claude,
+        "codex": codex,
+    }))
+}
+
+/// 一键接入状态：Claude Code / Codex 是否已指向本代理
+#[tauri::command]
+fn compat_integration_status(state: tauri::State<Arc<AppState>>) -> Result<serde_json::Value, String> {
+    compat_status_value(&state)
+}
+
+/// 一键接入：把 Claude Code / Codex 的本地配置改写为指向本代理
+#[tauri::command]
+fn compat_integrate(
+    state: tauri::State<Arc<AppState>>,
+    target: String,
+) -> Result<serde_json::Value, String> {
+    let (base, token) = compat_target(&state);
+    let home = compat_setup::home_dir()?;
+    match target.as_str() {
+        "claude" => {
+            let (models, fallback, max_ctx) = {
+                let cfg = state.config.read();
+                (
+                    proxy_model_names(&cfg),
+                    cfg.compat.claude_code_default_model.clone(),
+                    cfg.compat.claude_code_max_context_tokens,
+                )
+            };
+            compat_setup::integrate_claude(&home, &base, &token, &models, &fallback, max_ctx)?;
+        }
+        "codex" => {
+            // 默认模型 = 兜底模型；未配置兜底时取代理第一个模型
+            let default = {
+                let cfg = state.config.read();
+                match cfg.compat.codex_default_model.trim() {
+                    "" => proxy_model_names(&cfg).first().cloned().unwrap_or_default(),
+                    d => d.to_string(),
+                }
+            };
+            compat_setup::integrate_codex(&home, &format!("{base}/v1"), &token, &default)?;
+        }
+        other => return Err(format!("未知接入目标：{other}")),
+    }
+    compat_status_value(&state)
+}
+
+/// 断开接入：从快照恢复 CLI 原配置（无快照时仅移除本代理写入的键）
+#[tauri::command]
+fn compat_disconnect(
+    state: tauri::State<Arc<AppState>>,
+    target: String,
+) -> Result<serde_json::Value, String> {
+    let home = compat_setup::home_dir()?;
+    match target.as_str() {
+        "claude" => {
+            compat_setup::disconnect_claude(&home)?;
+        }
+        "codex" => {
+            compat_setup::disconnect_codex(&home)?;
+        }
+        other => return Err(format!("未知接入目标：{other}")),
+    }
+    compat_status_value(&state)
+}
+
 #[tauri::command]
 fn reset_user_usage(
     state: tauri::State<Arc<AppState>>,
@@ -517,6 +636,9 @@ pub fn run() {
             export_dataset_jsonl,
             clear_dataset,
             delete_dataset_record,
+            compat_integration_status,
+            compat_integrate,
+            compat_disconnect,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

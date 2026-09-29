@@ -279,69 +279,22 @@ pub fn forward_sse(
         }
 
         // 上游流结束（或出错）：无论客户端是否断连，都完成统计写入
-        let (input, output) = (*usage.lock()).unwrap_or((0, 0));
-        // 先聚合，得到聚合后的响应体大小，用于 tokens_out 估算和 response_bytes
-        let chunk_vals: Vec<serde_json::Value> = collected
-            .iter()
-            .filter_map(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-            .collect();
-        let agg = crate::proxy::db::aggregate_stream_response(&chunk_vals, &model, *usage.lock());
-        let agg_bytes = serde_json::to_vec(&agg)
-            .map(|b| b.len() as u64)
-            .unwrap_or(bytes_total);
-        // 上游未返回 usage 时，用聚合后响应体大小 / 4 估算 tokens_out
-        // （比用 SSE 原始流字节数 / 4 更准确，排除了协议开销）
-        let out_approx = if output == 0 {
-            (agg_bytes / 4) as u64
-        } else {
-            output
-        };
-        state.metrics.add_tokens(input, out_approx);
-        // bytes_in：统计请求体大小；bytes_out：用聚合后响应体大小（非 SSE 原始流）
-        let req_bytes = serde_json::to_vec(&req_body)
-            .map(|b| b.len() as u64)
-            .unwrap_or(0);
-        state.metrics.add_bytes(req_bytes, agg_bytes);
-        let ct_opt = if cached_tokens > 0 {
-            Some(cached_tokens)
-        } else {
-            None
-        };
-        // 回写流式统计到对应日志条目（含缓存命中状态）
-        // tokens_in 用上游返回的真实 prompt_tokens 覆盖估算值
-        let real_tokens_in = if input > 0 { Some(input) } else { None };
-        state
-            .metrics
-            .update_log_stream_stats(&log_id, agg_bytes, Some(out_approx), real_tokens_in);
-        state
-            .metrics
-            .update_log_cache_hit(&log_id, cache_hit, ct_opt);
-        // 推送更新后的完整日志到前端（局部刷新字节数、tokens、缓存命中）
-        state.emit_log_update(&log_id);
-        let db_guard = state.db.lock().clone();
-        if let Some(db) = db_guard {
-            let req_str = serde_json::to_string(&req_body).unwrap_or_default();
-            let resp_str = serde_json::to_string(&agg).unwrap_or_default();
-            let finetune = crate::proxy::db::build_finetune_jsonl(&req_body, &agg, true);
-            crate::proxy::db::spawn_insert(
-                db,
-                crate::proxy::db::InsertRecord {
-                    ts: log_ts,
-                    model: log_model,
-                    upstream_model: log_upstream_model,
-                    provider: log_provider,
-                    stream: true,
-                    // 用上游返回的真实 prompt_tokens 覆盖估算值
-                    tokens_in: real_tokens_in,
-                    tokens_out: Some(out_approx),
-                    cache_hit,
-                    cached_tokens: ct_opt,
-                    request_body: req_str,
-                    response_body: resp_str,
-                    finetune_jsonl: finetune,
-                },
-            );
-        }
+        finish_stream_bookkeeping(
+            &state,
+            StreamBookkeeping {
+                log_id,
+                log_ts,
+                log_model,
+                log_upstream_model,
+                log_provider,
+                req_body,
+                chunk_lines: collected,
+                usage: *usage.lock(),
+                bytes_total,
+                cache_hit,
+                cached_tokens,
+            },
+        );
         // drop tx 让接收端收到 None 从而结束客户端流
         drop(tx);
     });
@@ -354,4 +307,89 @@ pub fn forward_sse(
     };
 
     Sse::new(inner).keep_alive(KeepAlive::default())
+}
+
+/// 流结束后统一的统计回写 / 入库（`forward_sse` 与 compat 流式协议翻译共用）。
+pub(crate) struct StreamBookkeeping {
+    pub log_id: String,
+    pub log_ts: i64,
+    pub log_model: String,
+    pub log_upstream_model: Option<String>,
+    pub log_provider: Option<String>,
+    /// 转发给上游的 chat completions 请求体（bytes_in 统计与入库用）
+    pub req_body: serde_json::Value,
+    /// 上游 SSE data 行原文（chat 格式 chunk JSON）
+    pub chunk_lines: Vec<String>,
+    /// 上游 usage（prompt_tokens, completion_tokens）；流内未返回则为 None
+    pub usage: Option<(u64, u64)>,
+    /// 上游 SSE 原始字节数
+    pub bytes_total: u64,
+    pub cache_hit: bool,
+    pub cached_tokens: u64,
+}
+
+pub(crate) fn finish_stream_bookkeeping(state: &Arc<AppState>, bk: StreamBookkeeping) {
+    let (input, output) = bk.usage.unwrap_or((0, 0));
+    // 先聚合，得到聚合后的响应体大小，用于 tokens_out 估算和 response_bytes
+    let chunk_vals: Vec<serde_json::Value> = bk
+        .chunk_lines
+        .iter()
+        .filter_map(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .collect();
+    let agg = crate::proxy::db::aggregate_stream_response(&chunk_vals, &bk.log_model, bk.usage);
+    let agg_bytes = serde_json::to_vec(&agg)
+        .map(|b| b.len() as u64)
+        .unwrap_or(bk.bytes_total);
+    // 上游未返回 usage 时，用聚合后响应体大小 / 4 估算 tokens_out
+    // （比用 SSE 原始流字节数 / 4 更准确，排除了协议开销）
+    let out_approx = if output == 0 {
+        (agg_bytes / 4) as u64
+    } else {
+        output
+    };
+    state.metrics.add_tokens(input, out_approx);
+    // bytes_in：统计请求体大小；bytes_out：用聚合后响应体大小（非 SSE 原始流）
+    let req_bytes = serde_json::to_vec(&bk.req_body)
+        .map(|b| b.len() as u64)
+        .unwrap_or(0);
+    state.metrics.add_bytes(req_bytes, agg_bytes);
+    let ct_opt = if bk.cached_tokens > 0 {
+        Some(bk.cached_tokens)
+    } else {
+        None
+    };
+    // 回写流式统计到对应日志条目（含缓存命中状态）
+    // tokens_in 用上游返回的真实 prompt_tokens 覆盖估算值
+    let real_tokens_in = if input > 0 { Some(input) } else { None };
+    state
+        .metrics
+        .update_log_stream_stats(&bk.log_id, agg_bytes, Some(out_approx), real_tokens_in);
+    state
+        .metrics
+        .update_log_cache_hit(&bk.log_id, bk.cache_hit, ct_opt);
+    // 推送更新后的完整日志到前端（局部刷新字节数、tokens、缓存命中）
+    state.emit_log_update(&bk.log_id);
+    let db_guard = state.db.lock().clone();
+    if let Some(db) = db_guard {
+        let req_str = serde_json::to_string(&bk.req_body).unwrap_or_default();
+        let resp_str = serde_json::to_string(&agg).unwrap_or_default();
+        let finetune = crate::proxy::db::build_finetune_jsonl(&bk.req_body, &agg, true);
+        crate::proxy::db::spawn_insert(
+            db,
+            crate::proxy::db::InsertRecord {
+                ts: bk.log_ts,
+                model: bk.log_model,
+                upstream_model: bk.log_upstream_model,
+                provider: bk.log_provider,
+                stream: true,
+                tokens_in: real_tokens_in,
+                tokens_out: Some(out_approx),
+                cache_hit: bk.cache_hit,
+                cached_tokens: ct_opt,
+                request_body: req_str,
+                response_body: resp_str,
+                finetune_jsonl: finetune,
+            },
+        );
+    }
 }

@@ -2,6 +2,7 @@
 //!
 //! 支持会话粘性（sticky session），确保同一会话的重试/多轮对话请求
 //! 始终路由到同一上游，避免上下文丢失或缓存失效。
+//! 粘性记录按「会话 + 模型」各存一条，同一会话请求多个模型时互不干扰。
 //!
 //! # 模块结构
 //! - [`select`]         — 主入口：粘性优先（含熔断校验）→ 策略选择（eligible 子集）→ 记录粘性
@@ -118,6 +119,20 @@ pub fn select(
 
 // ─────────────────────────── 粘性会话 ───────────────────────────
 
+/// 粘性映射的存储键：session_key 与 model 组合。
+///
+/// 同一会话常会请求多个模型（主模型 + 小模型摘要、plan/act 双模型等），
+/// 若仅按 session_key 存一条记录，后请求的模型会覆盖先前的记录，
+/// 且 route_key 校验失败导致两个模型的粘性互相打断（每次切换都重选）。
+/// 按会话 + 模型各存一条，互不干扰。
+///
+/// 用 `\n` 分隔：HTTP header 值不允许换行，哈希来源只会产生十六进制字符；
+/// BodyField 来源理论上可构造出与另一对 (session, model) 拼接结果相同的值，
+/// 最坏后果是那两个组合共享一条粘性记录、校验失败重选，无正确性影响。
+fn sticky_map_key(session_key: &str, model: &str) -> String {
+    format!("{session_key}\n{model}")
+}
+
 /// 查找粘性映射，命中且未过期时返回候选索引。
 fn lookup_sticky(
     state: &AppState,
@@ -133,7 +148,8 @@ fn lookup_sticky(
         Stale,
     }
 
-    let verdict = match state.sticky_sessions.get_mut(session_key) {
+    let map_key = sticky_map_key(session_key, model);
+    let verdict = match state.sticky_sessions.get_mut(&map_key) {
         None => return None,
         Some(mut entry) => {
             // 校验未过期
@@ -159,7 +175,7 @@ fn lookup_sticky(
 
     // 失效条目立即回收，避免高并发短会话下 sticky_sessions 无界膨胀
     if matches!(verdict, Verdict::Expired | Verdict::Stale) {
-        state.sticky_sessions.remove(session_key);
+        state.sticky_sessions.remove(&map_key);
         return None;
     }
 
@@ -176,7 +192,7 @@ fn lookup_sticky(
     Some(index)
 }
 
-/// 将选中结果写入粘性映射。
+/// 将选中结果写入粘性映射（按会话 + 模型各存一条，见 [`sticky_map_key`]）。
 pub fn record_sticky(
     state: &AppState,
     session_key: &str,
@@ -185,7 +201,7 @@ pub fn record_sticky(
     model: &str,
 ) {
     state.sticky_sessions.insert(
-        session_key.to_string(),
+        sticky_map_key(session_key, model),
         StickyEntry {
             candidate_index: index,
             route_key: route_key_for_candidate(model, candidate),
@@ -1017,7 +1033,7 @@ mod tests {
             },
         };
         state.sticky_sessions.insert(
-            "sess-b".into(),
+            sticky_map_key("sess-b", "m"),
             crate::proxy::state::StickyEntry {
                 candidate_index: 1,
                 route_key: route_key("m", "b", ""),
@@ -1074,7 +1090,7 @@ mod tests {
 
         // 手工写入一条 route_key 与当前候选不匹配的过期粘性记录
         state.sticky_sessions.insert(
-            "sess-x".into(),
+            sticky_map_key("sess-x", "m"),
             crate::proxy::state::StickyEntry {
                 candidate_index: 1,
                 route_key: "m|stale-provider|".into(),
@@ -1094,7 +1110,10 @@ mod tests {
 
         let idx = select(&state, &candidates, "m", Some("sess-x"), &lb, None).unwrap();
         // route_key 不匹配 → 粘性失效 → 重新选择并覆盖记录
-        let entry = state.sticky_sessions.get("sess-x").unwrap();
+        let entry = state
+            .sticky_sessions
+            .get(&sticky_map_key("sess-x", "m"))
+            .unwrap();
         assert_eq!(
             entry.candidate_index, idx,
             "stale sticky entry should be re-selected and overwritten"
@@ -1126,7 +1145,7 @@ mod tests {
 
         let old = Instant::now() - std::time::Duration::from_secs(100);
         state.sticky_sessions.insert(
-            "sess-r".into(),
+            sticky_map_key("sess-r", "m"),
             crate::proxy::state::StickyEntry {
                 candidate_index: 0,
                 route_key: route_key("m", "a", ""),
@@ -1146,11 +1165,67 @@ mod tests {
 
         let idx = select(&state, &candidates, "m", Some("sess-r"), &lb, None).unwrap();
         assert_eq!(idx, 0, "未过期且 route_key 匹配应命中");
-        let entry = state.sticky_sessions.get("sess-r").unwrap();
+        let entry = state
+            .sticky_sessions
+            .get(&sticky_map_key("sess-r", "m"))
+            .unwrap();
         assert!(
             entry.created_at > old,
             "命中后 created_at 应被刷新（滑动过期）"
         );
+    }
+
+    #[test]
+    fn sticky_survives_other_model_in_same_session() {
+        // 同一会话请求多个模型时，各模型的粘性记录互不覆盖：
+        // m1 粘到 a → 中间插一次 m2 请求 → m1 仍应粘回 a。
+        // （修复前粘性按 session_key 全局唯一，m2 的记录覆盖 m1 的，
+        //   且 route_key 校验失败触发重选，多模型会话的粘性完全失效。）
+        let mut cfg = AppConfig::default();
+        cfg.providers = vec![
+            ProviderConfig {
+                id: "a".into(),
+                models: vec!["m1".into(), "m2".into()],
+                ..ProviderConfig::demo()
+            },
+            ProviderConfig {
+                id: "b".into(),
+                models: vec!["m1".into(), "m2".into()],
+                ..ProviderConfig::demo()
+            },
+        ];
+        let state = make_state();
+        let cands_m1 = make_candidates(&cfg, "m1");
+        let cands_m2 = make_candidates(&cfg, "m2");
+
+        let lb = LoadBalanceConfig {
+            enabled: true,
+            strategy: LbStrategy::RoundRobin,
+            sticky: StickyConfig {
+                enabled: true,
+                session_key_source: SessionKeySource::Header("x-session-id".into()),
+                ttl_secs: 1800,
+            },
+        };
+
+        // m1 首次选择（SWRR 等权首轮选第 0 个）并记录粘性；第二次应命中
+        let i1 = select(&state, &cands_m1, "m1", Some("sess-1"), &lb, None).unwrap();
+        let i2 = select(&state, &cands_m1, "m1", Some("sess-1"), &lb, None).unwrap();
+        assert_eq!(i1, i2, "m1 的粘性应命中");
+
+        // 同会话请求 m2：应写入 m2 自己的粘性记录，不影响 m1 的
+        let _ = select(&state, &cands_m2, "m2", Some("sess-1"), &lb, None).unwrap();
+
+        // m1 再次请求：仍粘回原上游
+        let i3 = select(&state, &cands_m1, "m1", Some("sess-1"), &lb, None).unwrap();
+        assert_eq!(
+            i1, i3,
+            "同会话其它模型的请求不应破坏 m1 的粘性"
+        );
+        // m2 的粘性也应独立成立
+        let m2_first = select(&state, &cands_m2, "m2", Some("sess-1"), &lb, None).unwrap();
+        let m2_again = select(&state, &cands_m2, "m2", Some("sess-1"), &lb, None).unwrap();
+        assert_eq!(m2_first, m2_again, "m2 的粘性应独立命中");
     }
 
     #[test]

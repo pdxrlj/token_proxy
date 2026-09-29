@@ -70,6 +70,62 @@ fn mock_router(
                     .get("stream")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
+
+                // 请求带 tools → 返回工具调用（供 compat 层翻译测试）
+                if body.get("tools").is_some() {
+                    if wants_stream {
+                        let tool_chunks = vec![
+                            json!({
+                                "id": "chatcmpl-mock-tc", "object": "chat.completion.chunk", "created": 0, "model": "mock-model",
+                                "choices": [{ "index": 0, "delta": { "tool_calls": [
+                                    { "index": 0, "id": "call_1", "type": "function", "function": { "name": "run_cmd", "arguments": "" } }
+                                ] }, "finish_reason": null }]
+                            }),
+                            json!({
+                                "id": "chatcmpl-mock-tc", "object": "chat.completion.chunk", "created": 0, "model": "mock-model",
+                                "choices": [{ "index": 0, "delta": { "tool_calls": [
+                                    { "index": 0, "function": { "arguments": "{\"cmd\":" } }
+                                ] }, "finish_reason": null }]
+                            }),
+                            json!({
+                                "id": "chatcmpl-mock-tc", "object": "chat.completion.chunk", "created": 0, "model": "mock-model",
+                                "choices": [{ "index": 0, "delta": { "tool_calls": [
+                                    { "index": 0, "function": { "arguments": "\"ls\"}" } }
+                                ] }, "finish_reason": "tool_calls" }]
+                            }),
+                            json!({
+                                "id": "chatcmpl-mock-tc", "object": "chat.completion.chunk", "created": 0, "model": "mock-model",
+                                "choices": [], "usage": { "prompt_tokens": 7, "completion_tokens": 5, "total_tokens": 12 }
+                            }),
+                        ];
+                        let mut events: Vec<Result<Event, Infallible>> = tool_chunks
+                            .into_iter()
+                            .map(|c| Ok(Event::default().data(c.to_string())))
+                            .collect();
+                        events.push(Ok(Event::default().data("[DONE]")));
+                        let s = Sse::new(stream::iter(events)).keep_alive(KeepAlive::default());
+                        return s.into_response();
+                    }
+                    return (
+                        StatusCode::OK,
+                        Json(json!({
+                            "id": "chatcmpl-mock-tc",
+                            "object": "chat.completion",
+                            "created": 0,
+                            "model": "mock-model",
+                            "choices": [{
+                                "index": 0,
+                                "message": { "role": "assistant", "content": null, "tool_calls": [
+                                    { "id": "call_1", "type": "function", "function": { "name": "run_cmd", "arguments": "{\"cmd\":\"ls\"}" } }
+                                ] },
+                                "finish_reason": "tool_calls"
+                            }],
+                            "usage": { "prompt_tokens": 7, "completion_tokens": 5, "total_tokens": 12 }
+                        })),
+                    )
+                        .into_response();
+                }
+
                 if wants_stream {
                     let chunks = vec!["Hello", " from", " the", " mock", " upstream"];
                     let mut events: Vec<Result<Event, Infallible>> = chunks
@@ -87,6 +143,18 @@ fn mock_router(
                             ))
                         })
                         .collect();
+                    // include_usage 语义：收尾块不带 choices，只带 usage
+                    events.push(Ok(Event::default().data(
+                        json!({
+                            "id": "chatcmpl-mock",
+                            "object": "chat.completion.chunk",
+                            "created": 0,
+                            "model": "mock-model",
+                            "choices": [],
+                            "usage": { "prompt_tokens": 10, "completion_tokens": 6, "total_tokens": 16 }
+                        })
+                        .to_string(),
+                    )));
                     events.push(Ok(Event::default().data("[DONE]")));
                     let s = Sse::new(stream::iter(events)).keep_alive(KeepAlive::default());
                     return s.into_response();
@@ -512,4 +580,392 @@ async fn smoke_forwards_client_identity_headers() {
         .unwrap_or("")
         .to_string();
     assert!(!ua.is_empty(), "上游必须能看到 UA，不能是空值");
+}
+
+// ─────────────────────────── 客户端协议兼容层（Claude Code / Codex）───────────────────────────
+
+/// 解析 SSE 文本为 (event, data) 列表。
+fn parse_sse(text: &str) -> Vec<(String, Value)> {
+    let mut events = Vec::new();
+    let mut event = String::new();
+    for line in text.lines() {
+        if let Some(e) = line.strip_prefix("event:") {
+            event = e.trim().to_string();
+        } else if let Some(d) = line.strip_prefix("data:") {
+            if let Ok(v) = serde_json::from_str::<Value>(d.trim()) {
+                events.push((event.clone(), v));
+            }
+            event.clear();
+        }
+    }
+    events
+}
+
+/// 带 compat 兜底模型的代理（claude-*/gpt-* 模型名改写为 mock-model）
+async fn spawn_proxy_compat(port: u16, mock_port: u16) -> Arc<AppState> {
+    let mut cfg = AppConfig::default();
+    cfg.server.port = port;
+    cfg.providers = vec![ProviderConfig {
+        id: "mock".into(),
+        name: "Mock".into(),
+        base_url: format!("http://127.0.0.1:{mock_port}/v1"),
+        api_key: String::new(),
+        timeout_secs: 30,
+        enabled: true,
+        models: vec!["mock-model".into()],
+        ..ProviderConfig::demo()
+    }];
+    cfg.routes = vec![RouteConfig {
+        model: "mock-model".into(),
+        provider: "mock".into(),
+        ..Default::default()
+    }];
+    cfg.compat.claude_code_default_model = "mock-model".into();
+    cfg.compat.codex_default_model = "mock-model".into();
+    let state = Arc::new(AppState::new(cfg, std::path::PathBuf::from("smoke.json")));
+    let s = state.clone();
+    tokio::spawn(async move {
+        proxy::serve(s).await.expect("proxy server");
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    state
+}
+
+#[tokio::test]
+async fn smoke_claude_code_non_stream() {
+    let counter = Arc::new(AtomicU32::new(0));
+    let recorder: BodyRecorder = Arc::new(Mutex::new(Vec::new()));
+    spawn_mock_with_recorder(19851, counter.clone(), Some(recorder.clone())).await;
+    spawn_proxy_compat(18801, 19851).await;
+    let client = reqwest::Client::new();
+    let base = "http://127.0.0.1:18801";
+
+    // Claude Code 形态的请求：claude-* 模型名 + system + user 消息
+    let resp = client
+        .post(format!("{base}/v1/messages"))
+        .header("x-api-key", "any-key")
+        .header("anthropic-version", "2023-06-01")
+        .json(&json!({
+            "model": "claude-sonnet-4-5-20250929",
+            "max_tokens": 100,
+            "system": "You are helpful",
+            "messages": [{ "role": "user", "content": "hi" }]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let v: Value = resp.json().await.unwrap();
+    assert_eq!(v["type"], "message");
+    assert_eq!(v["role"], "assistant");
+    assert_eq!(v["content"][0]["type"], "text");
+    assert_eq!(v["content"][0]["text"], "Hello from the mock upstream");
+    assert_eq!(v["stop_reason"], "end_turn");
+    assert_eq!(v["usage"]["input_tokens"], 10);
+    assert_eq!(v["usage"]["output_tokens"], 6);
+
+    // 上游收到的必须是 chat completions 格式，且模型被兜底改写
+    let upstream = recorder.lock().unwrap().last().unwrap().clone();
+    assert_eq!(upstream["model"], "mock-model");
+    assert_eq!(upstream["max_tokens"], 100);
+    assert_eq!(upstream["messages"][0]["role"], "system");
+    assert_eq!(upstream["messages"][0]["content"], "You are helpful");
+    assert_eq!(upstream["messages"][1]["role"], "user");
+    assert_eq!(upstream["messages"][1]["content"], "hi");
+    assert!(upstream.get("tools").is_none());
+
+    // count_tokens：不发起上游调用，返回估算值
+    let ct: Value = client
+        .post(format!("{base}/v1/messages/count_tokens"))
+        .json(&json!({
+            "model": "claude-sonnet-4-5-20250929",
+            "messages": [{ "role": "user", "content": "hello" }]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        ct["input_tokens"].as_u64().unwrap_or(0) > 0,
+        "count_tokens: {ct}"
+    );
+}
+
+#[tokio::test]
+async fn smoke_claude_code_stream() {
+    let counter = Arc::new(AtomicU32::new(0));
+    spawn_mock(19852, counter.clone()).await;
+    spawn_proxy_compat(18802, 19852).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post("http://127.0.0.1:18802/v1/messages")
+        .json(&json!({
+            "model": "claude-3-5-haiku-20241022",
+            "max_tokens": 100,
+            "stream": true,
+            "messages": [{ "role": "user", "content": "hi" }]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    assert!(ct.contains("text/event-stream"), "content-type: {ct}");
+
+    let text = resp.text().await.unwrap();
+    let events = parse_sse(&text);
+    let names: Vec<&str> = events.iter().map(|(e, _)| e.as_str()).collect();
+    assert_eq!(names.first(), Some(&"message_start"), "events: {names:?}");
+    assert!(names.contains(&"content_block_start"));
+    assert!(names.contains(&"content_block_delta"));
+    assert!(names.contains(&"content_block_stop"));
+    assert!(names.contains(&"message_delta"));
+    assert_eq!(names.last(), Some(&"message_stop"), "events: {names:?}");
+
+    // 拼接 text_delta 应等于上游完整文本
+    let joined: String = events
+        .iter()
+        .filter_map(|(e, v)| {
+            (e == "content_block_delta" && v["delta"]["type"] == "text_delta")
+                .then(|| v["delta"]["text"].as_str().unwrap_or("").to_string())
+        })
+        .collect();
+    assert_eq!(joined, "Hello from the mock upstream");
+    // message_delta 带收尾 stop_reason 与 output_tokens
+    let md = events
+        .iter()
+        .find(|(e, _)| e == "message_delta")
+        .expect("message_delta event");
+    assert_eq!(md.1["delta"]["stop_reason"], "end_turn");
+    assert_eq!(md.1["usage"]["output_tokens"], 6);
+}
+
+#[tokio::test]
+async fn smoke_claude_code_tool_roundtrip() {
+    let counter = Arc::new(AtomicU32::new(0));
+    let recorder: BodyRecorder = Arc::new(Mutex::new(Vec::new()));
+    spawn_mock_with_recorder(19853, counter.clone(), Some(recorder.clone())).await;
+    spawn_proxy_compat(18803, 19853).await;
+    let client = reqwest::Client::new();
+    let base = "http://127.0.0.1:18803";
+
+    // 第一轮：带 tools → 上游回 tool_calls → 应翻译为 tool_use block
+    let resp = client
+        .post(format!("{base}/v1/messages"))
+        .json(&json!({
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 200,
+            "tools": [{
+                "name": "run_cmd",
+                "description": "run a shell command",
+                "input_schema": { "type": "object", "properties": { "cmd": { "type": "string" } } }
+            }],
+            "messages": [{ "role": "user", "content": "list files" }]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let v: Value = resp.json().await.unwrap();
+    assert_eq!(v["stop_reason"], "tool_use", "response: {v}");
+    let block = &v["content"][0];
+    assert_eq!(block["type"], "tool_use");
+    assert_eq!(block["id"], "call_1");
+    assert_eq!(block["name"], "run_cmd");
+    assert_eq!(block["input"]["cmd"], "ls");
+
+    // 第二轮：Claude Code 回传 tool_result → 上游应收到 role:"tool" 消息
+    let resp2 = client
+        .post(format!("{base}/v1/messages"))
+        .json(&json!({
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 200,
+            "tools": [{ "name": "run_cmd", "input_schema": { "type": "object" } }],
+            "messages": [
+                { "role": "user", "content": "list files" },
+                { "role": "assistant", "content": [
+                    { "type": "tool_use", "id": "call_1", "name": "run_cmd", "input": { "cmd": "ls" } }
+                ] },
+                { "role": "user", "content": [
+                    { "type": "tool_result", "tool_use_id": "call_1", "content": "a.txt b.txt" }
+                ] }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp2.status(), 200);
+    let upstream = recorder.lock().unwrap().last().unwrap().clone();
+    let msgs = upstream["messages"].as_array().unwrap();
+    let tool_msg = msgs
+        .iter()
+        .find(|m| m["role"] == "tool")
+        .expect("tool message");
+    assert_eq!(tool_msg["tool_call_id"], "call_1");
+    assert_eq!(tool_msg["content"], "a.txt b.txt");
+    // assistant 消息应带 tool_calls
+    let assistant = msgs
+        .iter()
+        .find(|m| m["role"] == "assistant")
+        .expect("assistant");
+    assert_eq!(assistant["tool_calls"][0]["id"], "call_1");
+    assert_eq!(assistant["tool_calls"][0]["function"]["name"], "run_cmd");
+}
+
+#[tokio::test]
+async fn smoke_codex_non_stream() {
+    let counter = Arc::new(AtomicU32::new(0));
+    let recorder: BodyRecorder = Arc::new(Mutex::new(Vec::new()));
+    spawn_mock_with_recorder(19854, counter.clone(), Some(recorder.clone())).await;
+    spawn_proxy_compat(18804, 19854).await;
+    let client = reqwest::Client::new();
+    let base = "http://127.0.0.1:18804";
+
+    // Codex 形态：instructions + input 字符串，gpt-* 模型名走兜底改写
+    let resp = client
+        .post(format!("{base}/v1/responses"))
+        .header("authorization", "Bearer any-key")
+        .json(&json!({
+            "model": "gpt-5-codex",
+            "instructions": "Be terse.",
+            "input": "hi",
+            "stream": false
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let v: Value = resp.json().await.unwrap();
+    assert_eq!(v["object"], "response");
+    assert_eq!(v["status"], "completed");
+    assert_eq!(v["output"][0]["type"], "message");
+    assert_eq!(v["output"][0]["role"], "assistant");
+    assert_eq!(v["output"][0]["content"][0]["type"], "output_text");
+    assert_eq!(
+        v["output"][0]["content"][0]["text"],
+        "Hello from the mock upstream"
+    );
+    assert_eq!(v["usage"]["input_tokens"], 10);
+    assert_eq!(v["usage"]["output_tokens"], 6);
+
+    let upstream = recorder.lock().unwrap().last().unwrap().clone();
+    assert_eq!(upstream["model"], "mock-model");
+    let msgs = upstream["messages"].as_array().unwrap();
+    assert_eq!(msgs[0]["role"], "system");
+    assert_eq!(msgs[0]["content"], "Be terse.");
+    assert_eq!(msgs[1]["role"], "user");
+    assert_eq!(msgs[1]["content"], "hi");
+}
+
+#[tokio::test]
+async fn smoke_codex_stream_and_tool_roundtrip() {
+    let counter = Arc::new(AtomicU32::new(0));
+    let recorder: BodyRecorder = Arc::new(Mutex::new(Vec::new()));
+    spawn_mock_with_recorder(19855, counter.clone(), Some(recorder.clone())).await;
+    spawn_proxy_compat(18805, 19855).await;
+    let client = reqwest::Client::new();
+    let base = "http://127.0.0.1:18805";
+
+    // ── 流式 ──
+    let resp = client
+        .post(format!("{base}/v1/responses"))
+        .json(&json!({
+            "model": "gpt-5-codex",
+            "input": "hi",
+            "stream": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let text = resp.text().await.unwrap();
+    let events = parse_sse(&text);
+    let names: Vec<&str> = events.iter().map(|(e, _)| e.as_str()).collect();
+    assert_eq!(names.first(), Some(&"response.created"), "events: {names:?}");
+    assert!(names.contains(&"response.output_text.delta"));
+    assert!(names.contains(&"response.output_item.done"));
+    assert_eq!(names.last(), Some(&"response.completed"), "events: {names:?}");
+    let joined: String = events
+        .iter()
+        .filter_map(|(e, v)| {
+            (e == "response.output_text.delta")
+                .then(|| v["delta"].as_str().unwrap_or("").to_string())
+        })
+        .collect();
+    assert_eq!(joined, "Hello from the mock upstream");
+    let done = events
+        .iter()
+        .find(|(e, _)| e == "response.completed")
+        .expect("response.completed event");
+    assert_eq!(done.1["response"]["usage"]["input_tokens"], 10);
+    assert_eq!(
+        done.1["response"]["output"][0]["content"][0]["text"],
+        "Hello from the mock upstream"
+    );
+
+    // ── 工具调用轮次 ──
+    let tool = json!({
+        "type": "function",
+        "name": "run_cmd",
+        "description": "run a shell command",
+        "parameters": { "type": "object", "properties": { "cmd": { "type": "string" } } }
+    });
+    let resp = client
+        .post(format!("{base}/v1/responses"))
+        .json(&json!({
+            "model": "gpt-5-codex",
+            "input": [{ "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "list files" }] }],
+            "tools": [tool],
+            "stream": false
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let v: Value = resp.json().await.unwrap();
+    let fc = &v["output"][0];
+    assert_eq!(fc["type"], "function_call", "output: {v}");
+    assert_eq!(fc["call_id"], "call_1");
+    assert_eq!(fc["name"], "run_cmd");
+    assert_eq!(fc["arguments"], "{\"cmd\":\"ls\"}");
+
+    // 第二轮：Codex 回传 function_call_output → 上游应收到 role:"tool" 消息
+    let resp2 = client
+        .post(format!("{base}/v1/responses"))
+        .json(&json!({
+            "model": "gpt-5-codex",
+            "input": [
+                { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "list files" }] },
+                { "type": "function_call", "call_id": "call_1", "name": "run_cmd", "arguments": "{\"cmd\":\"ls\"}" },
+                { "type": "function_call_output", "call_id": "call_1", "output": "a.txt b.txt" }
+            ],
+            "tools": [tool],
+            "stream": false
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp2.status(), 200);
+    let upstream = recorder.lock().unwrap().last().unwrap().clone();
+    let msgs = upstream["messages"].as_array().unwrap();
+    let tool_msg = msgs
+        .iter()
+        .find(|m| m["role"] == "tool")
+        .expect("tool message");
+    assert_eq!(tool_msg["tool_call_id"], "call_1");
+    assert_eq!(tool_msg["content"], "a.txt b.txt");
+    // function_call 聚合为 assistant 消息的 tool_calls
+    let assistant = msgs
+        .iter()
+        .find(|m| m["role"] == "assistant")
+        .expect("assistant");
+    assert_eq!(assistant["tool_calls"][0]["function"]["name"], "run_cmd");
 }

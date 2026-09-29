@@ -26,6 +26,8 @@ notify = "7"
 token-proxy-core = { path = "proxy-core" }
 # 枚举本机网卡：总览页展示局域网访问地址
 local-ip-address = "0.6"
+# 一键接入 Codex：保格式改写 ~/.codex/config.toml（保留用户注释与其它配置）
+toml_edit = "0.22"
 
 [profile.release]
 panic = "abort"

@@ -37,7 +37,23 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/completions", post(chat_completions))
         .route("/v1/embeddings", post(chat_completions))
-        .route("/v1/responses", post(chat_completions))
+        // 客户端协议兼容层：Claude Code（Anthropic API）与 Codex（Responses API）。
+        // 注意 `/v1/responses` 不能映射到 chat_completions——Responses 格式的请求体
+        // 发给上游 /chat/completions 必然报错，必须走协议翻译。
+        .route("/v1/messages", post(crate::proxy::compat::anthropic::messages))
+        .route("/messages", post(crate::proxy::compat::anthropic::messages))
+        .route(
+            "/v1/messages/count_tokens",
+            post(crate::proxy::compat::anthropic::count_tokens),
+        )
+        .route(
+            "/v1/responses",
+            post(crate::proxy::compat::responses_api::responses),
+        )
+        .route(
+            "/responses",
+            post(crate::proxy::compat::responses_api::responses),
+        )
         .route("/v1/{*path}", post(fallback_proxy))
         .with_state(state)
         // 允许任意来源调用（本地代理场景）
@@ -81,17 +97,24 @@ async fn list_models(State(state): State<Arc<AppState>>) -> Json<serde_json::Val
     Json(serde_json::json!({ "object": "list", "data": data }))
 }
 
-/// 从 Authorization 头中提取 Bearer 令牌
-fn bearer_token(headers: &HeaderMap) -> Option<&str> {
-    let auth = headers
+/// 从请求头中提取客户端令牌。
+///
+/// 优先 `Authorization: Bearer <token>`；缺失时回落 `x-api-key`
+/// （Claude Code 以 ANTHROPIC_API_KEY 方式接入时用该头携带令牌）。
+pub(crate) fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    let from_auth = headers
         .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())?;
-    let token = auth.strip_prefix("Bearer ")?.trim();
-    if token.is_empty() {
-        None
-    } else {
-        Some(token)
-    }
+        .and_then(|v| v.to_str().ok())
+        .and_then(|auth| auth.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|t| !t.is_empty());
+    from_auth.or_else(|| {
+        headers
+            .get("x-api-key")
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+    })
 }
 
 /// 本地鉴权 + 用户配额校验。
@@ -112,7 +135,7 @@ fn bearer_token(headers: &HeaderMap) -> Option<&str> {
 ///    key（如 `sk-...`），若一律拒绝会导致这些客户端全部不可用。
 ///    代价是配额可被"改用随机 Key"绕过，故需要强制时请开启严格模式。
 /// 3. 未携带 Key：同 2 —— 未设置本地令牌时放行且不计配额（即"不携带 Key 不限次数"）。
-fn check_auth(state: &AppState, cfg: &AppConfig, headers: &HeaderMap) -> Result<(), ProxyError> {
+pub(crate) fn check_auth(state: &AppState, cfg: &AppConfig, headers: &HeaderMap) -> Result<(), ProxyError> {
     let local_key = cfg.server.local_api_key.trim();
     let strict = cfg.server.require_api_key;
 
@@ -537,7 +560,7 @@ async fn fallback_proxy(
 ///
 /// `content-type` 固定为 `text/event-stream`：SSE 帧由本层重新生成，
 /// 上游声明的值透传过来可能与实际的帧格式不符（如 gzip 之类已被解压）。
-fn sse_response<S, E>(sse: axum::response::sse::Sse<S>, upstream: &HeaderMap) -> Response
+pub(crate) fn sse_response<S, E>(sse: axum::response::sse::Sse<S>, upstream: &HeaderMap) -> Response
 where
     S: futures_util::Stream<Item = Result<axum::response::sse::Event, E>> + Send + 'static,
     E: Into<Box<dyn std::error::Error + Send + Sync>> + Send + 'static,
@@ -668,7 +691,7 @@ fn resolve_routing_context(
 /// 重试始终在同一候选上进行（不切换上游），避免上游缓存失效；
 /// 仅在熔断打开或重试耗尽时才 failover，且 failover 成功后
 /// 会把粘性记录更新到实际成功的候选，后续同会话请求直达健康上游。
-async fn route_and_call(
+pub(crate) async fn route_and_call(
     state: &Arc<AppState>,
     headers: &HeaderMap,
     path: &str,
@@ -965,7 +988,7 @@ async fn route_and_call(
 ///
 /// 所有失败出口统一走这里，保证 `error`（简短文本）与 `error_detail`（结构化）
 /// 成对写入，前端详情弹窗才能展示完整的诊断信息。
-fn attach_error(log: &mut RequestLog, e: &ProxyError, ctx: ErrorContext) {
+pub(crate) fn attach_error(log: &mut RequestLog, e: &ProxyError, ctx: ErrorContext) {
     log.error = Some(e.to_string());
     log.error_detail = Some(e.to_detail(ctx));
 }
@@ -1047,13 +1070,13 @@ fn estimate_input_tokens(body: &serde_json::Value) -> Option<u64> {
     body.to_string().len().checked_div(4).map(|v| v as u64)
 }
 
-fn finalize_log(state: &Arc<AppState>, log: RequestLog) {
+pub(crate) fn finalize_log(state: &Arc<AppState>, log: RequestLog) {
     state.metrics.record(log.clone());
     state.emit_log(&log);
 }
 
 /// 把成功请求的 prompt + completion 存入 SQLite（用于数据存储）
-fn save_to_db(
+pub(crate) fn save_to_db(
     state: &Arc<AppState>,
     log: &RequestLog,
     request_body: &serde_json::Value,
