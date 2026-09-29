@@ -7,13 +7,18 @@
 //! - assistant 消息中的 `tool_use` blocks → `tool_calls`，`thinking` blocks 丢弃
 //! - `tools[].input_schema` → `tools[].function.parameters`；
 //!   `tool_choice` auto/any/none/tool → auto/required/none/function
-//! - `max_tokens` / `temperature` / `top_p` / `stop_sequences` → 同名字段
-//! - `thinking` / `metadata` 等无对应概念的字段整体丢弃，不透传给上游
+//! - `max_tokens`（必填，缺失返回 400）/ `temperature` / `top_p` / `stop_sequences` → 同名字段
+//! - `metadata.user_id` → `user`；其余 metadata 键无对应概念，丢弃
+//! - `thinking` 等无对应概念的字段整体丢弃，不透传给上游
+//! - 图像 block：base64 `source` → data URI；url `source` → 直接透传 `image_url.url`
 //!
 //! 响应翻译（chat completions → Anthropic）：
 //! - `choices[0].message.content` → `[{type:"text"}]`，`tool_calls` → `[{type:"tool_use"}]`
 //! - `finish_reason` stop/length/tool_calls → `stop_reason` end_turn/max_tokens/tool_use
-//! - `usage` → `input_tokens` / `output_tokens` / `cache_read_input_tokens`
+//! - `usage` → `input_tokens` / `output_tokens`；缓存字段尽力映射：
+//!   `cache_read` ← `prompt_cache_hit_tokens`（fallback `prompt_tokens_details.cached_tokens`），
+//!   `cache_creation` ← `prompt_cache_miss_tokens`；上游不返回则为 0
+//! - `stop_sequence` 恒 null（上游不返回命中的 stop 序列，无法真实回填）
 //!
 //! 流式翻译（chat SSE → Anthropic SSE 事件流）：
 //! `message_start` → `content_block_start` → `content_block_delta`…
@@ -208,7 +213,9 @@ pub async fn messages(
 
 /// `POST /v1/messages/count_tokens`：Claude Code 的 token 预估端点。
 ///
-/// 翻译成 chat 请求体后按字节数粗估，不发起上游请求。
+/// 走上游真实计数：把翻译后的请求体改成 `max_tokens=1`、`stream=false` 发真实
+/// 上游请求，取返回 `usage.prompt_tokens` 作为真实输入计数。注意这会真实占用
+/// 一次上游调用与计费。上游失败 / 无 usage 时 fallback 回本地字节估算，保证端点可用。
 pub async fn count_tokens(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -230,11 +237,46 @@ pub async fn count_tokens(
         .unwrap_or("")
         .to_string();
     let model = resolve_model_or_fallback(&state, strip_context_suffix(&requested), &fallback);
-    let input_tokens = match translate_request(&body, &model) {
-        Ok(chat) => estimate_tokens(&chat),
-        Err(_) => estimate_tokens(&body),
-    };
-    Json(serde_json::json!({ "input_tokens": input_tokens })).into_response()
+    // count_tokens 是估算端点，客户端常不带 max_tokens；而 translate_request 视其为必填。
+    // 翻译前往 body 注入占位 max_tokens，使估算在缺省情况下也能走真实上游计数。
+    let mut body = body;
+    if body.get("max_tokens").is_none() {
+        body["max_tokens"] = serde_json::json!(1);
+    }
+    match translate_request(&body, &model) {
+        Ok(mut chat) => {
+            chat["max_tokens"] = serde_json::json!(1);
+            chat["stream"] = serde_json::Value::Bool(false);
+            chat.as_object_mut().map(|o| o.remove("stream_options"));
+            let mut log = RequestLog::new();
+            match route_and_call(&state, &headers, "/chat/completions", &chat, &mut log).await {
+                Ok(crate::proxy::upstream::UpstreamOutcome::Json(out)) => {
+                    let pt = out
+                        .value
+                        .get("usage")
+                        .and_then(|u| u.get("prompt_tokens"))
+                        .and_then(|v| v.as_u64());
+                    match pt {
+                        Some(n) => Json(serde_json::json!({ "input_tokens": n })).into_response(),
+                        None => Json(serde_json::json!({
+                            "input_tokens": estimate_tokens(&chat)
+                        }))
+                        .into_response(),
+                    }
+                }
+                // 上游异常 / 非 JSON：fallback 本地估算
+                _ => Json(serde_json::json!({
+                    "input_tokens": estimate_tokens(&chat)
+                }))
+                .into_response(),
+            }
+        }
+        // 翻译失败（如缺 max_tokens / messages 非法）：本地估算原始 body
+        Err(_) => Json(serde_json::json!({
+            "input_tokens": estimate_tokens(&body)
+        }))
+        .into_response(),
+    }
 }
 
 // ─────────────────────────── 错误响应 ───────────────────────────
@@ -285,6 +327,10 @@ pub(crate) fn translate_request(
             if !text.is_empty() {
                 messages.push(serde_json::json!({ "role": "system", "content": text }));
             }
+            // cache_control 无上游等价（OpenAI 缓存自动管理），仅记录不编造字段
+            if blocks.iter().any(|b| b.get("cache_control").is_some()) {
+                tracing::debug!("anthropic: system cache_control dropped (no chat-completions equivalent)");
+            }
         }
         _ => {}
     }
@@ -310,12 +356,25 @@ pub(crate) fn translate_request(
         .get("stream")
         .and_then(|s| s.as_bool())
         .unwrap_or(false);
+    // max_tokens 在 Anthropic 协议中必填；缺失时按标准返回 400，不再静默兜底
+    let max_tokens = body
+        .get("max_tokens")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| "max_tokens is required".to_string())?;
     let mut chat = serde_json::json!({
         "model": model,
-        // Anthropic 必填 max_tokens；缺失时给一个保守默认
-        "max_tokens": body.get("max_tokens").and_then(|v| v.as_u64()).unwrap_or(4096),
+        "max_tokens": max_tokens,
         "messages": messages,
     });
+
+    // metadata.user_id → chat.user（其余 metadata 键无对应概念，丢弃）
+    if let Some(uid) = body
+        .get("metadata")
+        .and_then(|m| m.get("user_id"))
+        .and_then(|u| u.as_str())
+    {
+        chat["user"] = serde_json::Value::String(uid.to_string());
+    }
 
     // tools：input_schema → function.parameters
     if let Some(tools) = body.get("tools").and_then(|t| t.as_array()) {
@@ -429,21 +488,38 @@ fn translate_blocks(role: &str, blocks: &[serde_json::Value], out: &mut Vec<serd
                 }
             }
             Some("image") => {
-                // base64 图像 → data URI
                 let src = b.get("source");
-                let media = src
-                    .and_then(|s| s.get("media_type"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("image/png");
-                let data = src
-                    .and_then(|s| s.get("data"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                if !data.is_empty() {
-                    parts.push(serde_json::json!({
-                        "type": "image_url",
-                        "image_url": { "url": format!("data:{media};base64,{data}") }
-                    }));
+                match src.and_then(|s| s.get("type")).and_then(|v| v.as_str()) {
+                    // url source：直接透传，不拼 data URI
+                    Some("url") => {
+                        if let Some(url) = src
+                            .and_then(|s| s.get("url"))
+                            .and_then(|v| v.as_str())
+                            .filter(|u| !u.is_empty())
+                        {
+                            parts.push(serde_json::json!({
+                                "type": "image_url",
+                                "image_url": { "url": url }
+                            }));
+                        }
+                    }
+                    // base64（默认）→ data URI
+                    _ => {
+                        let media = src
+                            .and_then(|s| s.get("media_type"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("image/png");
+                        let data = src
+                            .and_then(|s| s.get("data"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        if !data.is_empty() {
+                            parts.push(serde_json::json!({
+                                "type": "image_url",
+                                "image_url": { "url": format!("data:{media};base64,{data}") }
+                            }));
+                        }
+                    }
                 }
             }
             Some("tool_result") => {
@@ -525,11 +601,25 @@ pub(crate) fn translate_response(chat: &serde_json::Value, model: &str) -> serde
         .and_then(|u| u.get("completion_tokens"))
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
-    let cached = usage
-        .and_then(|u| u.pointer("/prompt_tokens_details/cached_tokens"))
+    // 尽力映射上游缓存字段：OpenAI 标准无 cache_creation/cache_read，
+    // 但 DeepSeek 风格上游返回 prompt_cache_hit_tokens / prompt_cache_miss_tokens。
+    // cache_read ← prompt_cache_hit_tokens，fallback 到 prompt_tokens_details.cached_tokens；
+    // cache_creation ← prompt_cache_miss_tokens（未命中即本次创建）。上游不返回则为 0。
+    let cache_read = usage
+        .and_then(|u| u.get("prompt_cache_hit_tokens"))
+        .and_then(|v| v.as_u64())
+        .or_else(|| {
+            usage
+                .and_then(|u| u.pointer("/prompt_tokens_details/cached_tokens"))
+                .and_then(|v| v.as_u64())
+        })
+        .unwrap_or(0);
+    let cache_creation = usage
+        .and_then(|u| u.get("prompt_cache_miss_tokens"))
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
 
+    // stop_sequence 恒 null：上游 chat completions 不返回命中的 stop 序列，无法真实回填
     serde_json::json!({
         "id": chat.get("id").cloned().unwrap_or(serde_json::json!("msg_proxy")),
         "type": "message",
@@ -540,8 +630,8 @@ pub(crate) fn translate_response(chat: &serde_json::Value, model: &str) -> serde
         "stop_sequence": serde_json::Value::Null,
         "usage": {
             "input_tokens": input_tokens,
-            "cache_creation_input_tokens": 0,
-            "cache_read_input_tokens": cached,
+            "cache_creation_input_tokens": cache_creation,
+            "cache_read_input_tokens": cache_read,
             "output_tokens": output_tokens,
         }
     })
@@ -956,6 +1046,71 @@ mod tests {
             "choices": [{ "index": 0, "message": { "role": "assistant", "content": "x" }, "finish_reason": "length" }],
         });
         assert_eq!(translate_response(&chat3, "m")["stop_reason"], "max_tokens");
+    }
+
+    #[test]
+    fn translate_request_metadata_user_id() {
+        let body = json!({
+            "model": "m", "max_tokens": 1,
+            "metadata": { "user_id": "u-123", "other": "ignored" },
+            "messages": [],
+        });
+        let chat = translate_request(&body, "m").unwrap();
+        assert_eq!(chat["user"], "u-123");
+        // 其余 metadata 键不透传
+        assert!(chat.get("other").is_none());
+    }
+
+    #[test]
+    fn translate_request_max_tokens_required() {
+        let body = json!({ "model": "m", "messages": [] });
+        assert!(translate_request(&body, "m").is_err());
+    }
+
+    #[test]
+    fn translate_request_url_image_source() {
+        let body = json!({
+            "model": "m", "max_tokens": 10,
+            "messages": [{ "role": "user", "content": [
+                { "type": "image", "source": { "type": "url", "url": "https://x/img.png" } },
+                { "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": "AAA" } },
+            ] }],
+        });
+        let chat = translate_request(&body, "m").unwrap();
+        let content = chat["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(content[0]["image_url"]["url"], "https://x/img.png");
+        assert_eq!(content[1]["image_url"]["url"], "data:image/png;base64,AAA");
+    }
+
+    #[test]
+    fn translate_response_cache_fields() {
+        // DeepSeek 风格上游：hit/miss 分开返回
+        let chat = json!({
+            "choices": [{ "index": 0, "message": { "role": "assistant", "content": "x" }, "finish_reason": "stop" }],
+            "usage": {
+                "prompt_tokens": 10, "completion_tokens": 2,
+                "prompt_cache_hit_tokens": 6, "prompt_cache_miss_tokens": 4,
+            }
+        });
+        let v = translate_response(&chat, "m");
+        assert_eq!(v["usage"]["cache_read_input_tokens"], 6);
+        assert_eq!(v["usage"]["cache_creation_input_tokens"], 4);
+        // fallback 到 prompt_tokens_details.cached_tokens
+        let chat2 = json!({
+            "choices": [{ "index": 0, "message": { "role": "assistant", "content": "x" }, "finish_reason": "stop" }],
+            "usage": { "prompt_tokens": 10, "completion_tokens": 2, "prompt_tokens_details": { "cached_tokens": 3 } }
+        });
+        let v2 = translate_response(&chat2, "m");
+        assert_eq!(v2["usage"]["cache_read_input_tokens"], 3);
+        assert_eq!(v2["usage"]["cache_creation_input_tokens"], 0);
+        // 上游不返回缓存字段 → 0
+        let chat3 = json!({
+            "choices": [{ "index": 0, "message": { "role": "assistant", "content": "x" }, "finish_reason": "stop" }],
+            "usage": { "prompt_tokens": 10, "completion_tokens": 2 }
+        });
+        let v3 = translate_response(&chat3, "m");
+        assert_eq!(v3["usage"]["cache_read_input_tokens"], 0);
+        assert_eq!(v3["usage"]["cache_creation_input_tokens"], 0);
     }
 
     #[test]

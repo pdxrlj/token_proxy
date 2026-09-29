@@ -18,9 +18,27 @@
 - 熔断器：上游连续失败达阈值后熔断冷却，半开试探自动恢复（每 Provider 独立）
 - 多 Provider + 路由表：模型 → 上游映射，支持参数改写（temperature/max_tokens 等）
 - 配置热重载：修改配置文件即时生效，无需重启
-- 桌面 GUI：总览 / 上游 Provider / 路由 / 请求日志 / 重试与设置五个页面，
+- 桌面 GUI：总览 / 上游 Provider / 路由 / 用户管理 / 请求日志 / 重试与设置六个页面，
   实时请求流、路由链路图、熔断状态展示
+- **用户与配额**：为每个 API Key 设定请求上限（`max_requests`，不填=不限），
+  原子计数、超额拒绝、可单独启停；用量存内存，重启清零
 - 本地鉴权：可选的 `local_api_key`，默认仅本机可访问
+
+## 界面预览
+
+| 总览 | 上游 Provider |
+|---|---|
+| ![总览](docs/screenshots/overview.png) | ![Provider](docs/screenshots/providers.png) |
+
+| 路由 | 用户管理 |
+|---|---|
+| ![路由](docs/screenshots/routes.png) | ![用户管理](docs/screenshots/users.png) |
+
+| 请求日志 | 重试与设置 |
+|---|---|
+| ![日志](docs/screenshots/logs.png) | ![设置](docs/screenshots/settings.png) |
+
+> 截图为 mock 数据驱动（`npm run build && npm run preview`）下的界面快照。
 
 ## 开发
 
@@ -187,7 +205,15 @@ wire_api = "responses"           # 由代理翻译为 chat completions
 
 其它说明：
 
-- `/v1/messages/count_tokens` 同样支持（按字节数粗估，不消耗上游）
+- `/v1/messages/count_tokens` 走上游真实计数：以 `max_tokens=1`、`stream=false`
+  的探针请求取上游 `usage.prompt_tokens` 返回；上游失败/无 usage 时回退本地估算
+  （不消耗上游）
+- `metadata.user_id` 透传为 chat 的 `user` 字段；图像 block 支持
+  `source.type == "url"`（直接透传）与 base64 两种来源
+- `max_tokens` 缺失时返回 400（标准协议下为必填字段）；`cache_creation_input_tokens`
+  /`cache_read_input_tokens` 尽力从上游 usage 映射（DeepSeek 风格的
+  `prompt_cache_miss_tokens`/`prompt_cache_hit_tokens` 或 `prompt_tokens_details.cached_tokens`），
+  上游不返回则 0
 - `x-api-key` 与 `Authorization: Bearer` 两种鉴权头均可
 - `/v1/responses` 请求一律翻译为 chat completions 后转发（上游只需 OpenAI
   chat 兼容）；流式翻译会给上游附加 `stream_options: {"include_usage": true}`

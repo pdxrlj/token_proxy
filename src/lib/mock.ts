@@ -141,6 +141,19 @@ export const MOCK_CONFIG: AppConfig = {
     codex_default_model: "",
     claude_code_max_context_tokens: 0,
   },
+  users: [
+    { id: "alice", name: "Alice · 前端组", key: "sk-tp-a1b2c3d4e5f6a1b2c3d4e5f6", enabled: true, max_requests: 1000 },
+    { id: "team-b", name: "B 组共享", key: "sk-tp-f6e5d4c3b2a1f6e5d4c3b2a1", enabled: true, max_requests: 500 },
+    { id: "jun", name: "", key: "sk-tp-11223344556677889900aabb", enabled: true, max_requests: null },
+    { id: "ops", name: "运维 · 已停用", key: "sk-tp-ffddeeff0011223344556677", enabled: false, max_requests: 200 },
+  ],
+};
+
+export const MOCK_USER_USAGE: Record<string, number> = {
+  alice: 412,
+  "team-b": 489,
+  jun: 73,
+  ops: 200,
 };
 
 export function mockStatus(): StatusDto {

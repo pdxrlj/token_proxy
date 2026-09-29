@@ -11,6 +11,7 @@ import type {
 } from "./types";
 import {
   MOCK_CONFIG,
+  MOCK_USER_USAGE,
   isTauri,
   mockBreakers,
   mockDataset,
@@ -73,7 +74,7 @@ export const api = {
   getUserUsage: () =>
     isTauri
       ? invoke<Record<string, number>>("get_user_usage")
-      : Promise.resolve({}),
+      : Promise.resolve(MOCK_USER_USAGE),
   getStatus: () =>
     isTauri ? invoke<StatusDto>("get_status") : Promise.resolve(mockStatus()),
   getMetrics: () =>
