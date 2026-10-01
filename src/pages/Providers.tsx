@@ -1,8 +1,19 @@
 import { useState } from "react";
 import type { AppData } from "../hooks/useAppData";
-import type { ProviderConfig } from "../lib/types";
+import type { ProviderConfig, UpstreamModel } from "../lib/types";
+import { CATEGORY_META } from "../lib/types";
+import { api } from "../lib/tauri";
 import { Button, Field, Modal, StatusDot, Switch, useToast } from "../components/ui";
-import { KeyRound, Pencil, Plus, RefreshCw, Server, Trash2 } from "lucide-react";
+import {
+  CloudDownload,
+  KeyRound,
+  Pencil,
+  Plus,
+  RefreshCw,
+  Server,
+  Trash2,
+  X,
+} from "lucide-react";
 
 function emptyProvider(): ProviderConfig {
   return {
@@ -13,9 +24,25 @@ function emptyProvider(): ProviderConfig {
     timeout_secs: 300,
     enabled: true,
     models: [],
+    model_categories: {},
     user_agent: "",
     headers: {},
   };
+}
+
+/** 候选区的类别筛选 tab */
+const CATEGORY_TABS = ["all", "text", "multimodal", "image"] as const;
+type CategoryFilter = (typeof CATEGORY_TABS)[number];
+
+/** 上下文窗口缩写：1048576 → 1M，262144 → 256k */
+function fmtContext(n?: number | null): string | null {
+  if (!n || n <= 0) return null;
+  if (n >= 1024 * 1024) {
+    const m = n / (1024 * 1024);
+    return `${Number.isInteger(m) ? m : m.toFixed(1)}M`;
+  }
+  if (n >= 1024) return `${Math.round(n / 1024)}k`;
+  return String(n);
 }
 
 export function Providers({ data }: { data: AppData }) {
@@ -23,55 +50,148 @@ export function Providers({ data }: { data: AppData }) {
   const toast = useToast();
   const [editing, setEditing] = useState<ProviderConfig | null>(null);
   const [isNew, setIsNew] = useState(false);
-  const [modelsText, setModelsText] = useState("");
+  const [selectedModels, setSelectedModels] = useState<string[]>([]);
   const [headersText, setHeadersText] = useState("");
   const [showKey, setShowKey] = useState<Record<string, boolean>>({});
+  const [fetchedModels, setFetchedModels] = useState<UpstreamModel[] | null>(null);
+  const [fetching, setFetching] = useState(false);
+  const [catFilter, setCatFilter] = useState<CategoryFilter>("all");
+  const [searchText, setSearchText] = useState("");
+  const [manualInput, setManualInput] = useState("");
 
   const openNew = () => {
     setEditing(emptyProvider());
-    setModelsText("");
+    setSelectedModels([]);
     setHeadersText("");
+    resetFetchState();
     setIsNew(true);
   };
 
   const openEdit = (p: ProviderConfig) => {
     setEditing({ ...p });
-    setModelsText(p.models.join("\n"));
+    setSelectedModels([...p.models]);
     setHeadersText(
       p.headers && Object.keys(p.headers).length > 0
         ? JSON.stringify(p.headers, null, 2)
         : "",
     );
+    resetFetchState();
     setIsNew(false);
+  };
+
+  const resetFetchState = () => {
+    setFetchedModels(null);
+    setCatFilter("all");
+    setSearchText("");
+    setManualInput("");
+  };
+
+  /** 某模型已知的类别：本次拉取结果优先，其次配置里缓存的类别（手动添加的模型两者皆无） */
+  const categoryOf = (id: string): string =>
+    fetchedModels?.find((m) => m.id === id)?.category ??
+    editing?.model_categories?.[id] ??
+    "";
+
+  /** 已选 / 取消一个模型：selectedModels 是唯一事实来源 */
+  const toggleModel = (id: string) => {
+    setSelectedModels((cur) =>
+      cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id],
+    );
+  };
+
+  /** 手动输入回车：添加为标签（无类别信息） */
+  const addManualModel = () => {
+    const id = manualInput.trim();
+    if (!id) return;
+    if (!selectedModels.includes(id)) {
+      toggleModel(id);
+    }
+    setManualInput("");
+  };
+
+  /** 候选区当前可见（未选中且通过类别/搜索筛选）的模型 */
+  const visibleModels = (fetchedModels ?? []).filter(
+    (m) =>
+      !selectedModels.includes(m.id) &&
+      (catFilter === "all" || m.category === catFilter) &&
+      (!searchText.trim() ||
+        m.id.toLowerCase().includes(searchText.trim().toLowerCase())),
+  );
+
+  /** 全选当前可见的候选模型 */
+  const selectVisible = () => {
+    setSelectedModels((cur) => [
+      ...cur,
+      ...visibleModels.map((m) => m.id).filter((id) => !cur.includes(id)),
+    ]);
+  };
+
+  /** 解析自定义请求头输入框；不合法时 toast 并返回 null */
+  const parseHeaders = (): Record<string, string> | null => {
+    const raw = headersText.trim();
+    if (!raw) return {};
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      toast("自定义请求头不是合法的 JSON", "err");
+      return null;
+    }
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      toast("自定义请求头需写成 JSON 对象", "err");
+      return null;
+    }
+    return Object.fromEntries(
+      Object.entries(parsed as Record<string, unknown>).map(([k, v]) => [k, String(v)]),
+    );
+  };
+
+  /** 从上游 GET /models 拉取可用模型列表；已选模型保留，候选区出现新模型供点选 */
+  const fetchModels = async () => {
+    if (!editing || fetching) return;
+    if (!editing.base_url.trim()) {
+      toast("请先填写 Base URL", "err");
+      return;
+    }
+    const headers = parseHeaders();
+    if (headers === null) return;
+
+    setFetching(true);
+    try {
+      const models = await api.fetchProviderModels({
+        base_url: editing.base_url,
+        api_key: editing.api_key,
+        user_agent: editing.user_agent || undefined,
+        headers,
+      });
+      setFetchedModels(models);
+      if (models.length === 0) {
+        toast("上游返回了空的模型列表", "err");
+      } else {
+        toast(`已获取 ${models.length} 个模型，点击标签按需添加`);
+      }
+    } catch (e) {
+      toast(String(e), "err");
+    } finally {
+      setFetching(false);
+    }
   };
 
   const saveProvider = async () => {
     if (!editing) return;
-    const models = modelsText
-      .split("\n")
-      .map((s) => s.trim())
-      .filter(Boolean);
+    const models = selectedModels.map((s) => s.trim()).filter(Boolean);
 
-    const rawHeaders = headersText.trim();
-    let headers: Record<string, string> = {};
-    if (rawHeaders) {
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(rawHeaders);
-      } catch {
-        toast("自定义请求头不是合法的 JSON", "err");
-        return;
-      }
-      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-        toast("自定义请求头需写成 JSON 对象", "err");
-        return;
-      }
-      headers = Object.fromEntries(
-        Object.entries(parsed as Record<string, unknown>).map(([k, v]) => [k, String(v)]),
-      );
+    // 类别缓存：本次拉取到的优先，沿用配置里已有的；只保留仍选中的模型
+    const model_categories: Record<string, string> = {};
+    for (const id of models) {
+      const c = categoryOf(id);
+      if (c) model_categories[id] = c;
     }
 
-    const provider: ProviderConfig = { ...editing, models, headers };
+    const headers = parseHeaders();
+    if (headers === null) return;
+
+    const provider: ProviderConfig = { ...editing, models, headers, model_categories };
 
     if (isNew) {
       if (!provider.id) {
@@ -173,9 +293,18 @@ export function Providers({ data }: { data: AppData }) {
                   </div>
                   {p.models.length > 0 && (
                     <div className="provider-models">
-                      {p.models.map((m) => (
-                        <span className="chip" key={m}>{m}</span>
-                      ))}
+                      {p.models.map((m) => {
+                        const cat = p.model_categories?.[m];
+                        const meta = cat ? CATEGORY_META[cat] : undefined;
+                        return (
+                          <span className="chip" key={m}>
+                            {meta && (
+                              <span className={`cat-dot ${cat}`} title={meta.label} />
+                            )}
+                            {m}
+                          </span>
+                        );
+                      })}
                     </div>
                   )}
                 </div>
@@ -283,14 +412,110 @@ export function Providers({ data }: { data: AppData }) {
               onChange={(e) => setHeadersText(e.target.value)}
             />
           </Field>
-          <Field label="可用模型" help="每行一个模型名，回车分隔">
-            <textarea
-              className="textarea"
-              rows={4}
-              value={modelsText}
-              placeholder={"gpt-4o\ngpt-4o-mini"}
-              onChange={(e) => setModelsText(e.target.value)}
-            />
+          <Field
+            label="可用模型"
+            help="点击「获取模型列表」从上游拉取，再点击下方候选标签按需添加；也可手动输入模型名后回车"
+          >
+            <div className="model-fetch-bar">
+              <Button size="sm" onClick={fetchModels} disabled={fetching}>
+                <CloudDownload size={13} className={fetching ? "spin" : undefined} />
+                {fetching ? "获取中…" : "获取模型列表"}
+              </Button>
+              {selectedModels.length > 0 && (
+                <span className="model-fetch-meta">
+                  已选 {selectedModels.length} 个模型
+                </span>
+              )}
+            </div>
+            {/* 已选区：要保存的模型标签 */}
+            <div className="model-tags">
+              {selectedModels.map((id) => {
+                const cat = CATEGORY_META[categoryOf(id)];
+                return (
+                  <span key={id} className={`model-tag${cat ? "" : " no-cat"}`}>
+                    <span className="model-tag-id">{id}</span>
+                    {cat && (
+                      <span className={`modality-chip ${cat.cls}`}>{cat.label}</span>
+                    )}
+                    <button
+                      type="button"
+                      className="model-tag-x"
+                      aria-label={`移除 ${id}`}
+                      onClick={() => toggleModel(id)}
+                    >
+                      <X size={11} />
+                    </button>
+                  </span>
+                );
+              })}
+              <input
+                className="model-add-input"
+                value={manualInput}
+                placeholder={selectedModels.length === 0 ? "手动添加模型名，回车确认" : "+ 添加"}
+                onChange={(e) => setManualInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    addManualModel();
+                  }
+                }}
+              />
+            </div>
+            {/* 候选区：上游拉取到、尚未选用的模型 */}
+            {fetchedModels && fetchedModels.length > 0 && (
+              <div className="model-palette">
+                <div className="model-palette-bar">
+                  <div className="cat-tabs">
+                    {CATEGORY_TABS.map((c) => (
+                      <button
+                        key={c}
+                        type="button"
+                        className={`cat-tab${catFilter === c ? " on" : ""}`}
+                        onClick={() => setCatFilter(c)}
+                      >
+                        {c === "all" ? "全部" : CATEGORY_META[c].label}
+                      </button>
+                    ))}
+                  </div>
+                  <input
+                    className="input model-search"
+                    value={searchText}
+                    placeholder="搜索模型…"
+                    onChange={(e) => setSearchText(e.target.value)}
+                  />
+                  <button className="link-btn" onClick={selectVisible}>
+                    全选
+                  </button>
+                  <button className="link-btn" onClick={() => setSelectedModels([])}>
+                    清空
+                  </button>
+                </div>
+                <div className="model-chip-cloud">
+                  {visibleModels.map((m) => {
+                    const cat = CATEGORY_META[m.category];
+                    const ctx = fmtContext(m.context_length);
+                    return (
+                      <button
+                        key={m.id}
+                        type="button"
+                        className="model-chip"
+                        onClick={() => toggleModel(m.id)}
+                      >
+                        <span className="model-chip-id">{m.id}</span>
+                        {cat && (
+                          <span className={`modality-chip ${cat.cls}`}>{cat.label}</span>
+                        )}
+                        {ctx && <span className="model-chip-ctx">{ctx}</span>}
+                        <Plus size={10} className="model-chip-add" />
+                      </button>
+                    );
+                  })}
+                  {visibleModels.length === 0 && (
+                    <span className="model-palette-empty">没有匹配的模型</span>
+                  )}
+                </div>
+              </div>
+            )}
           </Field>
           <div className="form-actions">
             <Button variant="ghost" onClick={() => setEditing(null)}>取消</Button>

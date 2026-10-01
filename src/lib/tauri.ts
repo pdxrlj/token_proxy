@@ -8,6 +8,7 @@ import type {
   MetricsSnapshot,
   RequestLog,
   StatusDto,
+  UpstreamModel,
 } from "./types";
 import {
   MOCK_CONFIG,
@@ -20,6 +21,15 @@ import {
   mockMetrics,
   mockStatus,
 } from "./mock";
+
+/** 预览模式下的上游模型列表（非 Tauri 环境无真实上游可请求） */
+const MOCK_FETCHED_MODELS: UpstreamModel[] = [
+  { id: "glm-5.2", category: "text", context_length: 1048576 },
+  { id: "deepseek-v4-flash", category: "text", context_length: 1048576 },
+  { id: "sensenova-6.8-flash-lite", category: "multimodal", context_length: 262144 },
+  { id: "sensenova-u1-fast", category: "image", context_length: 262144 },
+  { id: "gpt-4o", category: "", context_length: null },
+];
 
 /** 预览模式下的接入状态（非 Tauri 环境无真实配置文件可读写） */
 const MOCK_COMPAT_STATUS: CompatIntegrationStatus = {
@@ -47,6 +57,22 @@ export const api = {
       : Promise.resolve(MOCK_CONFIG),
   saveConfig: (cfg: AppConfig) =>
     isTauri ? invoke<void>("save_config", { cfg }) : Promise.resolve(),
+  /** 拉取上游可用模型列表（表单当前值，可能尚未保存）。
+   *  Tauri v2 参数名要求 camelCase（自动映射到 Rust 的 snake_case）。 */
+  fetchProviderModels: (params: {
+    base_url: string;
+    api_key: string;
+    user_agent?: string;
+    headers?: Record<string, string>;
+  }): Promise<UpstreamModel[]> =>
+    isTauri
+      ? invoke<UpstreamModel[]>("fetch_provider_models", {
+          baseUrl: params.base_url,
+          apiKey: params.api_key,
+          userAgent: params.user_agent,
+          headers: params.headers,
+        })
+      : Promise.resolve(MOCK_FETCHED_MODELS),
   reloadConfig: () =>
     isTauri ? invoke<AppConfig>("reload_config") : Promise.resolve(MOCK_CONFIG),
   /** 导出配置为 JSON 字符串（含 API Key 等敏感信息） */

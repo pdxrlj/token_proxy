@@ -72,6 +72,7 @@ export const MOCK_CONFIG: AppConfig = {
       timeout_secs: 300,
       enabled: true,
       models: ["gpt-4o", "gpt-4o-mini", "gpt-4.1"],
+      model_categories: { "gpt-4o": "multimodal", "gpt-4o-mini": "text", "gpt-4.1": "multimodal" },
     },
     {
       id: "deepseek",
@@ -81,6 +82,7 @@ export const MOCK_CONFIG: AppConfig = {
       timeout_secs: 300,
       enabled: true,
       models: ["deepseek-chat", "deepseek-reasoner"],
+      model_categories: { "deepseek-chat": "text", "deepseek-reasoner": "text" },
     },
     {
       id: "anthropic",

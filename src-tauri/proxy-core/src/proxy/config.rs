@@ -318,6 +318,13 @@ pub struct ProviderConfig {
     pub timeout_secs: u64,
     pub enabled: bool,
     pub models: Vec<String>,
+    /// 模型类别缓存（模型 id → `text` / `multimodal` / `image`）。
+    ///
+    /// 「获取模型列表」时从上游模态字段推断并随配置保存，让界面在
+    /// 不重新拉取的情况下也能展示类别；仅用于展示，路由与转发不使用。
+    /// 手动添加的模型无条目；未获取过时为空表。
+    #[serde(default)]
+    pub model_categories: std::collections::BTreeMap<String, String>,
     /// 转发到该上游时使用的 User-Agent。
     ///
     /// 为空则表示"跟随客户端"：客户端带了就用客户端的，没带则回落到
@@ -342,6 +349,7 @@ impl ProviderConfig {
             timeout_secs: 300,
             enabled: true,
             models: vec!["gpt-4o".into(), "gpt-4o-mini".into(), "gpt-4.1".into()],
+            model_categories: std::collections::BTreeMap::new(),
             user_agent: String::new(),
             headers: std::collections::BTreeMap::new(),
         }

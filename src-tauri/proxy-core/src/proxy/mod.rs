@@ -5,6 +5,7 @@
 //! - [`api`]      — HTTP 处理器与请求路由
 //! - [`lb`]       — 负载均衡选择器（SWRR / 慢启动 / 粘性会话）
 //! - [`upstream`] — 上游调用与 SSE 流转发
+//! - [`models`]   — 上游可用模型列表拉取（含模态分类）
 //! - [`retry`]    — 重试退避与错误类型
 //! - [`circuit`]  — 熔断器（503 立即跳闸 / 半开恢复 / Panic 模式）
 //! - [`probe`]    — 主动探活任务（熔断到期后自动试探上游）
@@ -20,6 +21,7 @@ pub mod config;
 pub mod db;
 pub mod headers;
 pub mod lb;
+pub mod models;
 pub mod probe;
 pub mod retry;
 pub mod state;

@@ -430,16 +430,18 @@ async fn fallback_proxy(
             state.metrics.add_bytes(req_bytes, resp_bytes);
             // 缓存命中检测
             let usage = out.value.get("usage");
-            // 用上游返回的真实 prompt_tokens 覆盖估算值
-            if let Some(pt) = usage
-                .and_then(|u| u.get("prompt_tokens"))
-                .and_then(|t| t.as_u64())
-            {
+            // 用上游返回的真实 token 数覆盖估算值。chat 格式用
+            // prompt_tokens / completion_tokens；Images API（gpt-image-1）用
+            // input_tokens / output_tokens，兜底端点两种命名都读。
+            let usage_num = |name: &str| {
+                usage
+                    .and_then(|u| u.get(name))
+                    .and_then(|t| t.as_u64())
+            };
+            if let Some(pt) = usage_num("prompt_tokens").or_else(|| usage_num("input_tokens")) {
                 log.tokens_in = Some(pt);
             }
-            log.tokens_out = usage
-                .and_then(|u| u.get("completion_tokens"))
-                .and_then(|t| t.as_u64());
+            log.tokens_out = usage_num("completion_tokens").or_else(|| usage_num("output_tokens"));
             let cache_hit = usage.map(|u| detect_cache_hit(u)).unwrap_or(false);
             log.cache_hit = cache_hit;
             let cached_tokens = usage

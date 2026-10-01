@@ -55,10 +55,36 @@ export interface ProviderConfig {
   timeout_secs: number;
   enabled: boolean;
   models: string[];
+  /**
+   * 模型类别缓存（id → text / multimodal / image），随配置保存；
+   * 「获取模型列表」时从上游模态字段推断，手动添加的模型无条目
+   */
+  model_categories?: Record<string, string>;
   /** 转发到该上游时使用的 User-Agent；留空表示跟随客户端 */
   user_agent?: string;
   /** 附加到上游请求的自定义头，优先级高于客户端透传头 */
   headers?: Record<string, string>;
+}
+
+// ─────────────────────────── 上游模型列表 ───────────────────────────
+
+/** 模型类别的显示名与配色（category 为空 = 上游未提供模态信息，不展示徽标） */
+export const CATEGORY_META: Record<string, { label: string; cls: string }> = {
+  text: { label: "文本", cls: "cat-text" },
+  multimodal: { label: "多模态", cls: "cat-multimodal" },
+  image: { label: "图片", cls: "cat-image" },
+};
+
+/** 上游 /models 返回的单个模型（fetch_provider_models 命令响应） */
+export interface UpstreamModel {
+  id: string;
+  /**
+   * 模型类别（按上游模态字段推断）：
+   * text 文本 / multimodal 多模态 / image 图片生成；上游未提供模态信息时为空
+   */
+  category: string;
+  /** 上下文窗口（tokens）；上游未提供时为 null */
+  context_length?: number | null;
 }
 
 // ─────────────────────────── 路由配置 ───────────────────────────

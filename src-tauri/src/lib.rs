@@ -64,6 +64,32 @@ async fn save_config(
     Ok(())
 }
 
+/// 拉取上游可用模型列表（GUI「添加/编辑 Provider」用）。
+///
+/// 参数来自表单当前值（可能尚未保存），因此独立于已存配置：
+/// 直接用 base_url / api_key / user_agent / headers 组装请求。
+/// 返回的模型带有按模态推断的类别（text / multimodal / image，无信息时为空）。
+#[tauri::command]
+async fn fetch_provider_models(
+    state: tauri::State<'_, Arc<AppState>>,
+    base_url: String,
+    api_key: String,
+    user_agent: Option<String>,
+    headers: Option<std::collections::BTreeMap<String, String>>,
+) -> Result<Vec<token_proxy_core::proxy::models::UpstreamModel>, String> {
+    if base_url.trim().is_empty() {
+        return Err("请先填写 Base URL".into());
+    }
+    token_proxy_core::proxy::models::fetch_upstream_models(
+        &state.http,
+        base_url.trim(),
+        api_key.trim(),
+        user_agent.as_deref().unwrap_or(""),
+        &headers.unwrap_or_default(),
+    )
+    .await
+}
+
 /// 导出当前完整配置为 JSON 字符串（含 API Key）。
 ///
 /// 保留供脚本 / 调试使用；应用内的「导出配置」走
@@ -621,6 +647,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_config,
             save_config,
+            fetch_provider_models,
             reload_config,
             export_config,
             export_config_to_file,

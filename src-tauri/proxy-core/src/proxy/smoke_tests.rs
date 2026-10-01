@@ -969,3 +969,166 @@ async fn smoke_codex_stream_and_tool_roundtrip() {
         .expect("assistant");
     assert_eq!(assistant["tool_calls"][0]["function"]["name"], "run_cmd");
 }
+
+// ─────────────────────── 图片生成（/v1/images/generations 兜底透传）───────────────────────
+//
+// 图片模型没有专用端点，走 `/v1/{*path}` 兜底透传：按 body.model 解析路由后
+// 原样转发到 `{base_url}/images/generations`。这里验证非流式与流式两条链路，
+// 以及模型只配在 provider.models（隐式候选，无显式路由，即 GUI「获取模型列表」
+// 勾选后的形态）时的可达性。
+
+/// 图片生成 mock 上游：记录收到的请求路径与请求体，支持非流式 JSON 与流式 SSE 两种应答
+async fn spawn_image_mock(port: u16, recorder: BodyRecorder) {
+    async fn handle(
+        axum::Extension(recorder): axum::Extension<BodyRecorder>,
+        axum::extract::Path(path): axum::extract::Path<String>,
+        Json(body): Json<Value>,
+    ) -> axum::response::Response {
+        recorder
+            .lock()
+            .unwrap()
+            .push(json!({ "path": path, "body": body }));
+        let wants_stream = body
+            .get("stream")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if wants_stream {
+            // gpt-image-1 形态的流式事件：partial_image 进度 + completed 收尾
+            let events = vec![
+                json!({
+                    "type": "image_generation.partial_image",
+                    "b64_json": "cGFydGlhbA==",
+                    "partial_image_index": 0
+                }),
+                json!({
+                    "type": "image_generation.completed",
+                    "b64_json": "Y29tcGxldGVk",
+                    "usage": { "input_tokens": 9, "output_tokens": 100, "total_tokens": 109 }
+                }),
+            ];
+            let mut out: Vec<Result<Event, Infallible>> = events
+                .into_iter()
+                .map(|e| Ok(Event::default().data(e.to_string())))
+                .collect();
+            out.push(Ok(Event::default().data("[DONE]")));
+            let s = Sse::new(stream::iter(out)).keep_alive(KeepAlive::default());
+            s.into_response()
+        } else {
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "created": 1777392000u64,
+                    "data": [{ "b64_json": "aUNvZGUxMjM=", "revised_prompt": "a red cube" }],
+                    "usage": { "input_tokens": 5, "output_tokens": 50, "total_tokens": 55 }
+                })),
+            )
+                .into_response()
+        }
+    }
+    let listener = TcpListener::bind(("127.0.0.1", port))
+        .await
+        .expect("bind image mock port");
+    let app = Router::new()
+        .route("/v1/{*path}", post(handle))
+        .layer(axum::Extension(recorder));
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("image mock server");
+    });
+}
+
+/// 代理端配置：图片模型只出现在 provider.models 中，不配显式路由
+async fn spawn_image_proxy(port: u16, mock_port: u16) -> Arc<AppState> {
+    let mut cfg = AppConfig::default();
+    cfg.server.port = port;
+    cfg.providers = vec![ProviderConfig {
+        id: "img".into(),
+        name: "ImageMock".into(),
+        base_url: format!("http://127.0.0.1:{mock_port}/v1"),
+        api_key: "sk-img".into(),
+        timeout_secs: 30,
+        enabled: true,
+        models: vec!["mock-image-model".into()],
+        ..ProviderConfig::demo()
+    }];
+    cfg.routes = vec![];
+    let state = Arc::new(AppState::new(cfg, std::path::PathBuf::from("smoke.json")));
+    let s = state.clone();
+    tokio::spawn(async move {
+        proxy::serve(s).await.expect("proxy server");
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    state
+}
+
+#[tokio::test]
+async fn smoke_image_generations() {
+    let recorder: BodyRecorder = Arc::new(Mutex::new(Vec::new()));
+    spawn_image_mock(9951, recorder.clone()).await;
+    let state = spawn_image_proxy(8799, 9951).await;
+    let client = reqwest::Client::new();
+    let base = "http://127.0.0.1:8799";
+
+    // ── 非流式：OpenAI Images API 形态 ──
+    let resp = client
+        .post(format!("{base}/v1/images/generations"))
+        .json(&json!({
+            "model": "mock-image-model",
+            "prompt": "draw a red cube",
+            "size": "1024x1024"
+        }))
+        .send()
+        .await
+        .unwrap();
+    if resp.status() != 200 {
+        let status = resp.status();
+        let t = resp.text().await.unwrap();
+        panic!("image non-stream unexpected status {status} body: {t}");
+    }
+    assert_eq!(resp.status(), 200);
+    let v: Value = resp.json().await.unwrap();
+    assert_eq!(v["data"][0]["b64_json"], "aUNvZGUxMjM=");
+    assert_eq!(v["data"][0]["revised_prompt"], "a red cube");
+
+    // 上游收到的路径与请求体：路径原样、prompt/size 原样透传
+    let upstream = recorder.lock().unwrap().last().unwrap().clone();
+    assert_eq!(upstream["path"], "images/generations");
+    assert_eq!(upstream["body"]["prompt"], "draw a red cube");
+    assert_eq!(upstream["body"]["size"], "1024x1024");
+
+    // 指标照常记录：1 次成功请求，usage 的 input/output tokens 被记录（5 / 50）
+    let snap = state.metrics.snapshot();
+    assert_eq!(snap.total, 1);
+    assert_eq!(snap.success, 1);
+    assert_eq!(snap.tokens_in, 5);
+    assert_eq!(snap.tokens_out, 50);
+
+    // ── 流式：SSE 事件原样透传 ──
+    let resp = client
+        .post(format!("{base}/v1/images/generations"))
+        .json(&json!({
+            "model": "mock-image-model",
+            "prompt": "draw a red cube",
+            "stream": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    assert!(ct.contains("text/event-stream"), "content-type: {ct}");
+    let text = resp.text().await.unwrap();
+    assert!(
+        text.contains("image_generation.partial_image"),
+        "stream body: {text}"
+    );
+    assert!(
+        text.contains("image_generation.completed"),
+        "missing completed event: {text}"
+    );
+    assert!(text.contains("[DONE]"), "missing [DONE] in: {text}");
+}

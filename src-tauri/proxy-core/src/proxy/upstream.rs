@@ -206,11 +206,13 @@ pub fn forward_sse(
                     if data != "[DONE]" {
                         if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
                             if let Some(u) = v.get("usage") {
+                                // chat 格式 prompt/completion_tokens；Images API 流式
+                                // 用 input/output_tokens，两种命名都读
+                                let get = |name: &str| u.get(name).and_then(|x| x.as_u64());
                                 let input =
-                                    u.get("prompt_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
-                                let output = u
-                                    .get("completion_tokens")
-                                    .and_then(|x| x.as_u64())
+                                    get("prompt_tokens").or_else(|| get("input_tokens")).unwrap_or(0);
+                                let output = get("completion_tokens")
+                                    .or_else(|| get("output_tokens"))
                                     .unwrap_or(0);
                                 *usage.lock() = Some((input, output));
                                 let ct = extract_cached_tokens(u);
