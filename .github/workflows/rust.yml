@@ -15,11 +15,10 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Show repository layout (debug)
-        # 列出仓库文件，帮助确认 Cargo.toml 的位置
         run: |
           echo "PWD: $PWD"
           echo "List files recursively:"
-          dir /S
+          Get-ChildItem -Path $PWD -Recurse
 
       - name: Setup Rust toolchain
         uses: actions-rs/toolchain@v1
