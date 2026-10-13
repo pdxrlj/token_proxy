@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - master
   workflow_dispatch:
     inputs:
       publish_release:
@@ -22,15 +23,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
-
-      - name: Show repository layout (debug)
-        # 明确使用 PowerShell，避免 cmd 风格命令被误解析
-        shell: pwsh
-        run: |
-          Write-Host "PWD: $PWD"
-          Write-Host "List files recursively (limited depth for readability):"
-          Get-ChildItem -Path $PWD -Recurse -Force | Select-Object -First 200
+        uses: actions/checkout@v4
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -38,32 +31,23 @@ jobs:
           node-version: '18'
           cache: 'npm'
 
-      - name: Cache npm (lock-based)
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.npm
-            node_modules
-          key: npm-cache-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
-          restore-keys: |
-            npm-cache-${{ runner.os }}-
-
       - name: Install frontend deps
-        if: exists('package-lock.json') || exists('package.json')
-        run: npm ci
+        if: ${{ hashFiles('package-lock.json') != '' || hashFiles('package.json') != '' }}
+        shell: bash
+        run: |
+          if [ -f package-lock.json ] || [ -f package.json ]; then
+            npm ci
+          fi
 
       - name: Build frontend (if applicable)
-        if: contains(join(hashFiles('package.json','**/package.json')), '') == false || always() == false
-        # 如果你的前端需要构建，请取消注释并修改下面两行（或替换为你的构建命令）
-        # run: npm run build
-        run: echo "跳过前端构建（如需启用，请修改 workflow 中的此步骤）"
+        if: ${{ hashFiles('package.json') != '' || hashFiles('**/package.json') != '' }}
+        shell: bash
+        run: |
+          echo "跳过前端构建（如需启用，请取消注释并改为你的 build 命令）"
+          # npm run build
 
       - name: Setup Rust toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          profile: minimal
-          override: true
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Cargo registry and src-tauri/target
         uses: actions/cache@v4
@@ -72,12 +56,13 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             src-tauri/target
-          key: cargo-cache-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
           restore-keys: |
-            cargo-cache-${{ runner.os }}-
+            ${{ runner.os }}-cargo-
 
       - name: Build release (cargo)
         working-directory: src-tauri
+        shell: bash
         run: cargo build --release --locked
 
       - name: Upload EXE artifact
