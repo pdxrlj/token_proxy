@@ -20,17 +20,66 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 60
     permissions:
-      contents: write # 创建 Release 需要
+      contents: write
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Determine release tag
+        id: rel
+        shell: bash
+        run: |
+          TAG=""
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            TAG="${{ github.ref_name }}"
+          elif [ -n "${{ github.event.inputs.release_tag }}" ]; then
+            TAG="${{ github.event.inputs.release_tag }}"
+          fi
+          if [ -n "$TAG" ]; then
+            echo "tag=$TAG"           >> "$GITHUB_OUTPUT"
+            echo "create_release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "create_release=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "18"
           cache: "npm"
+
+      - name: Set app version from release tag
+        if: ${{ steps.rel.outputs.create_release == 'true' }}
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ steps.rel.outputs.tag }}
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$') {
+            throw "Release tag '$env:RELEASE_TAG' must be a semantic version such as v1.2.3"
+          }
+
+          $version = $env:RELEASE_TAG -replace '^v', ''
+          npm version $version --no-git-tag-version --allow-same-version
+          if ($LASTEXITCODE -ne 0) { throw "npm version failed" }
+
+          $configPath = "src-tauri/tauri.conf.json"
+          $config = Get-Content $configPath -Raw | ConvertFrom-Json
+          $config.version = $version
+          $config | ConvertTo-Json -Depth 100 | Set-Content $configPath -Encoding utf8
+
+          $cargoPath = "src-tauri/Cargo.toml"
+          $cargo = Get-Content $cargoPath -Raw
+          $packagePattern = [regex]::new('(?s)\[package\].*?(?=\r?\n\[|\z)')
+          $packageMatch = $packagePattern.Match($cargo)
+          if (-not $packageMatch.Success) { throw "Cargo.toml has no [package] section" }
+          $versionPattern = [regex]::new('(?m)^version\s*=\s*"[^"]+"')
+          $packageSection = $packageMatch.Value
+          if (-not $versionPattern.IsMatch($packageSection)) { throw "Cargo.toml package version was not found" }
+          $packageSection = $versionPattern.Replace($packageSection, "version = `"$version`"", 1)
+          $cargo = $cargo.Substring(0, $packageMatch.Index) + $packageSection + $cargo.Substring($packageMatch.Index + $packageMatch.Length)
+          Set-Content $cargoPath -Value $cargo -Encoding utf8
+          Write-Host "Building release $env:RELEASE_TAG with app version $version"
 
       - name: Install frontend dependencies
         run: npm ci
@@ -49,10 +98,27 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      # tauri build 会自动执行 beforeBuildCommand(npm run build) 构建前端，
-      # 再编译 Rust，最后生成 MSI / NSIS 安装包到 bundle/ 目录
       - name: Build Tauri app
         run: npm run tauri build
+
+      - name: Rename release assets with tag
+        if: ${{ steps.rel.outputs.create_release == 'true' }}
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ steps.rel.outputs.tag }}
+        run: |
+          $version = $env:RELEASE_TAG
+          $msi = Get-ChildItem "src-tauri/target/release/bundle/msi/*.msi" | Select-Object -First 1
+          $setup = Get-ChildItem "src-tauri/target/release/bundle/nsis/*-setup.exe" | Select-Object -First 1
+          $portable = Get-Item "src-tauri/target/release/token-proxy.exe"
+
+          if (-not $msi) { throw "MSI bundle was not found" }
+          if (-not $setup) { throw "NSIS setup bundle was not found" }
+          if (-not $portable) { throw "Portable executable was not found" }
+
+          Rename-Item $msi.FullName "Token.Proxy_${version}_x64_en-US.msi"
+          Rename-Item $setup.FullName "Token.Proxy_${version}_x64-setup.exe"
+          Rename-Item $portable.FullName "token-proxy-${version}.exe"
 
       - name: List build output
         shell: bash
@@ -62,26 +128,6 @@ jobs:
           echo "=== Portable exe ==="
           ls -la src-tauri/target/release/*.exe 2>/dev/null || echo "(none)"
 
-      # 判断是否需要创建 Release：
-      #   tag push → 用 tag 名；手动触发且有 release_tag → 用输入值；否则跳过
-      - name: Determine release tag
-        id: rel
-        shell: bash
-        run: |
-          TAG=""
-          if [ "${{ github.ref_type }}" = "tag" ]; then
-            TAG="${{ github.ref_name }}"
-          elif [ -n "${{ github.event.inputs.release_tag }}" ]; then
-            TAG="${{ github.event.inputs.release_tag }}"
-          fi
-          if [ -n "$TAG" ]; then
-            echo "tag=$TAG"           >> "$GITHUB_OUTPUT"
-            echo "create_release=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "create_release=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      # CI 构建（非 Release）→ 上传 artifact，可从 Actions 页面下载
       - name: Upload build artifacts (CI)
         if: ${{ steps.rel.outputs.create_release != 'true' }}
         uses: actions/upload-artifact@v4
@@ -93,8 +139,6 @@ jobs:
             src-tauri/target/release/token-proxy.exe
           if-no-files-found: warn
 
-      # Release 构建 → 创建 GitHub Release 并上传安装包
-      # Release 构建 → 创建 GitHub Release 并上传安装包
       - name: Create GitHub Release
         if: ${{ steps.rel.outputs.create_release == 'true' }}
         uses: ncipollo/release-action@v1
@@ -104,7 +148,7 @@ jobs:
           artifacts: |
             src-tauri/target/release/bundle/msi/*.msi
             src-tauri/target/release/bundle/nsis/*.exe
-            src-tauri/target/release/token-proxy.exe
+            src-tauri/target/release/token-proxy-v*.exe
           immutableCreate: true
           allowUpdates: true
           generateReleaseNotes: true
