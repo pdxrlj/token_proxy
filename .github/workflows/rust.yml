@@ -1,4 +1,4 @@
-name: Build Windows EXE
+name: Rust Build
 
 on:
   push:
@@ -12,9 +12,9 @@ on:
         required: false
         default: 'false'
       release_tag:
-        description: 'Release 的 tag 名称（仅在 publish_release 为 true 时使用）'
+        description: 'Release 的 tag 名称（留空则自动使用 v<run_number>）'
         required: false
-        default: 'v${{ github.run_number }}'
+        default: ''
 
 jobs:
   build-windows:
@@ -72,10 +72,21 @@ jobs:
           path: src-tauri/target/release/*.exe
           if-no-files-found: error
 
+      - name: Compute release tag
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release == 'true' }}
+        id: tag
+        shell: bash
+        run: |
+          TAG="${{ github.event.inputs.release_tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="v${{ github.run_number }}"
+          fi
+          echo "value=$TAG" >> "$GITHUB_OUTPUT"
+
       - name: Create GitHub Release and upload exe (optional)
         if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release == 'true' }}
         uses: ncipollo/release-action@v1
         with:
-          tag: ${{ github.event.inputs.release_tag }}
-          name: Release ${{ github.event.inputs.release_tag }}
+          tag: ${{ steps.tag.outputs.value }}
+          name: Release ${{ steps.tag.outputs.value }}
           files: src-tauri/target/release/*.exe
