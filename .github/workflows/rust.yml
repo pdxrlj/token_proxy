@@ -1,25 +1,26 @@
-name: Rust Build
+name: Build & Release
 
+# ── 触发条件 ──────────────────────────────────────────────
+# 1. push 到 main/master  → 仅构建，上传 artifact（CI 验证）
+# 2. push v* tag          → 构建并自动创建 Release（含安装包）
+# 3. 手动触发             → 可填 release_tag，填了就发 Release
 on:
   push:
-    branches:
-      - main
-      - master
+    branches: [main, master]
+    tags: ['v*']
   workflow_dispatch:
     inputs:
-      publish_release:
-        description: '是否创建 Release 并上传 exe（true/false）'
-        required: false
-        default: 'false'
       release_tag:
-        description: 'Release 的 tag 名称（留空则自动使用 v<run_number>）'
+        description: 'Release tag（如 v0.1.0，留空则仅构建不上传 Release）'
         required: false
         default: ''
 
 jobs:
-  build-windows:
+  build:
     runs-on: windows-latest
     timeout-minutes: 60
+    permissions:
+      contents: write          # 创建 Release 需要
 
     steps:
       - name: Checkout repository
@@ -31,25 +32,13 @@ jobs:
           node-version: '18'
           cache: 'npm'
 
-      - name: Install frontend deps
-        if: ${{ hashFiles('package-lock.json') != '' || hashFiles('package.json') != '' }}
-        shell: bash
-        run: |
-          if [ -f package-lock.json ] || [ -f package.json ]; then
-            npm ci
-          fi
-
-      - name: Build frontend (if applicable)
-        if: ${{ hashFiles('package.json') != '' || hashFiles('**/package.json') != '' }}
-        shell: bash
-        run: |
-          echo "跳过前端构建（如需启用，请取消注释并改为你的 build 命令）"
-          # npm run build
+      - name: Install frontend dependencies
+        run: npm ci
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache Cargo registry and src-tauri/target
+      - name: Cache Cargo
         uses: actions/cache@v4
         with:
           path: |
@@ -60,33 +49,60 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Build release (cargo)
-        working-directory: src-tauri
-        shell: bash
-        run: cargo build --release --locked
+      # tauri build 会自动执行 beforeBuildCommand(npm run build) 构建前端，
+      # 再编译 Rust，最后生成 MSI / NSIS 安装包到 bundle/ 目录
+      - name: Build Tauri app
+        run: npm run tauri build
 
-      - name: Upload EXE artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: token_proxy-windows-exe
-          path: src-tauri/target/release/*.exe
-          if-no-files-found: error
-
-      - name: Compute release tag
-        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release == 'true' }}
-        id: tag
+      - name: List build output
         shell: bash
         run: |
-          TAG="${{ github.event.inputs.release_tag }}"
-          if [ -z "$TAG" ]; then
-            TAG="v${{ github.run_number }}"
-          fi
-          echo "value=$TAG" >> "$GITHUB_OUTPUT"
+          echo "=== Bundle ==="
+          find src-tauri/target/release/bundle -type f 2>/dev/null || echo "(none)"
+          echo "=== Portable exe ==="
+          ls -la src-tauri/target/release/*.exe 2>/dev/null || echo "(none)"
 
-      - name: Create GitHub Release and upload exe (optional)
-        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release == 'true' }}
+      # 判断是否需要创建 Release：
+      #   tag push → 用 tag 名；手动触发且有 release_tag → 用输入值；否则跳过
+      - name: Determine release tag
+        id: rel
+        shell: bash
+        run: |
+          TAG=""
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            TAG="${{ github.ref_name }}"
+          elif [ -n "${{ github.event.inputs.release_tag }}" ]; then
+            TAG="${{ github.event.inputs.release_tag }}"
+          fi
+          if [ -n "$TAG" ]; then
+            echo "tag=$TAG"           >> "$GITHUB_OUTPUT"
+            echo "create_release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "create_release=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # CI 构建（非 Release）→ 上传 artifact，可从 Actions 页面下载
+      - name: Upload build artifacts (CI)
+        if: ${{ steps.rel.outputs.create_release != 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: token-proxy-windows-bundle
+          path: |
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/token-proxy.exe
+          if-no-files-found: warn
+
+      # Release 构建 → 创建 GitHub Release 并上传安装包
+      - name: Create GitHub Release
+        if: ${{ steps.rel.outputs.create_release == 'true' }}
         uses: ncipollo/release-action@v1
         with:
-          tag: ${{ steps.tag.outputs.value }}
-          name: Release ${{ steps.tag.outputs.value }}
-          files: src-tauri/target/release/*.exe
+          tag: ${{ steps.rel.outputs.tag }}
+          name: Token Proxy ${{ steps.rel.outputs.tag }}
+          artifacts: |
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/token-proxy.exe
+          allowUpdates: true
+          generateReleaseNotes: true
