@@ -1,25 +1,62 @@
 name: Build Windows EXE
 
 on:
-  workflow_dispatch:
   push:
     branches:
       - main
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: '是否创建 Release 并上传 exe（true/false）'
+        required: false
+        default: 'false'
+      release_tag:
+        description: 'Release 的 tag 名称（仅在 publish_release 为 true 时使用）'
+        required: false
+        default: 'v${{ github.run_number }}'
 
 jobs:
   build-windows:
     runs-on: windows-latest
+    timeout-minutes: 60
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
 
       - name: Show repository layout (debug)
+        # 明确使用 PowerShell，避免 cmd 风格命令被误解析
         shell: pwsh
         run: |
           Write-Host "PWD: $PWD"
-          Write-Host "List files recursively:"
-          Get-ChildItem -Path $PWD -Recurse
+          Write-Host "List files recursively (limited depth for readability):"
+          Get-ChildItem -Path $PWD -Recurse -Force | Select-Object -First 200
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Cache npm (lock-based)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.npm
+            node_modules
+          key: npm-cache-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            npm-cache-${{ runner.os }}-
+
+      - name: Install frontend deps
+        if: exists('package-lock.json') || exists('package.json')
+        run: npm ci
+
+      - name: Build frontend (if applicable)
+        if: contains(join(hashFiles('package.json','**/package.json')), '') == false || always() == false
+        # 如果你的前端需要构建，请取消注释并修改下面两行（或替换为你的构建命令）
+        # run: npm run build
+        run: echo "跳过前端构建（如需启用，请修改 workflow 中的此步骤）"
 
       - name: Setup Rust toolchain
         uses: actions-rs/toolchain@v1
@@ -28,9 +65,20 @@ jobs:
           profile: minimal
           override: true
 
-      - name: Build release
+      - name: Cache Cargo registry and src-tauri/target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: cargo-cache-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            cargo-cache-${{ runner.os }}-
+
+      - name: Build release (cargo)
         working-directory: src-tauri
-        run: cargo build --release
+        run: cargo build --release --locked
 
       - name: Upload EXE artifact
         uses: actions/upload-artifact@v4
@@ -38,3 +86,11 @@ jobs:
           name: token_proxy-windows-exe
           path: src-tauri/target/release/*.exe
           if-no-files-found: error
+
+      - name: Create GitHub Release and upload exe (optional)
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release == 'true' }}
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ github.event.inputs.release_tag }}
+          name: Release ${{ github.event.inputs.release_tag }}
+          files: src-tauri/target/release/*.exe
