@@ -26,22 +26,22 @@ export type PageKey =
 
 const NAV: { key: PageKey; label: string; icon: ReactNode }[] = [
   { key: "overview", label: "总览", icon: <LayoutDashboard size={16} /> },
-  { key: "providers", label: "上游 Provider", icon: <ServerCog size={16} /> },
-  { key: "routes", label: "路由", icon: <Waypoints size={16} /> },
-  { key: "users", label: "用户管理", icon: <Users size={16} /> },
+  { key: "providers", label: "模型", icon: <ServerCog size={16} /> },
+  { key: "routes", label: "路由策略", icon: <Waypoints size={16} /> },
+  { key: "users", label: "访问控制", icon: <Users size={16} /> },
   { key: "logs", label: "请求日志", icon: <ScrollText size={16} /> },
-  { key: "dataset", label: "数据存储", icon: <Database size={16} /> },
-  { key: "settings", label: "重试与设置", icon: <Settings size={16} /> },
+  { key: "dataset", label: "数据归档", icon: <Database size={16} /> },
+  { key: "settings", label: "运行设置", icon: <Settings size={16} /> },
 ];
 
 const PAGE_TITLES: Record<PageKey, { title: string; sub: string }> = {
   overview: { title: "总览", sub: "代理运行状态与实时流量" },
-  providers: { title: "上游 Provider", sub: "管理模型服务商与密钥" },
-  routes: { title: "路由", sub: "模型到上游的转发规则" },
-  users: { title: "用户管理", sub: "管理使用者及其请求配额" },
-  logs: { title: "请求日志", sub: "每次转发的完整记录" },
-  dataset: { title: "数据存储", sub: "成功请求的 prompt + completion 存档" },
-  settings: { title: "重试与设置", sub: "失败重试策略、服务配置与导入导出" },
+  providers: { title: "模型", sub: "接入与管理各家大模型服务商" },
+  routes: { title: "路由策略", sub: "配置模型转发与优先级规则" },
+  users: { title: "访问控制", sub: "管理调用者、Key 与请求限额" },
+  logs: { title: "请求日志", sub: "追踪每次转发的上下文与结果" },
+  dataset: { title: "数据归档", sub: "存储成功请求的 prompt 与 completion" },
+  settings: { title: "运行设置", sub: "重试、熔断与服务参数配置" },
 };
 
 export function AppShell({
@@ -86,7 +86,7 @@ export function AppShell({
           </div>
           <div>
             <div className="brand-name">Token Proxy</div>
-            <div className="brand-sub">Dispatch Console</div>
+            <div className="brand-sub">AI Gateway</div>
           </div>
         </div>
 

@@ -7,20 +7,20 @@ name: Build & Release
 on:
   push:
     branches: [main, master]
-    tags: ['v*']
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Release tag（如 v0.1.0，留空则仅构建不上传 Release）'
+        description: "Release tag（如 v0.1.0，留空则仅构建不上传 Release）"
         required: false
-        default: ''
+        default: ""
 
 jobs:
   build:
     runs-on: windows-latest
     timeout-minutes: 60
     permissions:
-      contents: write          # 创建 Release 需要
+      contents: write # 创建 Release 需要
 
     steps:
       - name: Checkout repository
@@ -29,8 +29,8 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
-          cache: 'npm'
+          node-version: "18"
+          cache: "npm"
 
       - name: Install frontend dependencies
         run: npm ci
