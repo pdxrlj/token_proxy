@@ -14,12 +14,30 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
+      - name: Show repository layout (debug)
+        # 列出仓库文件，帮助确认 Cargo.toml 的位置
+        run: |
+          echo "PWD: $PWD"
+          echo "List files recursively:"
+          dir /S
+
+      - name: Setup Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+
       - name: Build release
+        # 如果你的 Cargo.toml 在子目录 token_proxy 下，使用下面的 working-directory
+        working-directory: token_proxy
         run: cargo build --release
+        # 可选替代：不用切目录，直接指定清单文件路径（去掉上面的 working-directory 并启用下面的行）
+        # run: cargo build --release --manifest-path token_proxy/Cargo.toml
 
       - name: Upload EXE artifact
         uses: actions/upload-artifact@v4
         with:
           name: token_proxy-windows-exe
-          path: target/release/*.exe
+          path: token_proxy/target/release/*.exe
           if-no-files-found: error
